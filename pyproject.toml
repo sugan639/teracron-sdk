@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teracron-sdk"
+version = "0.1.0"
+description = "Teracron memory metrics agent for Python applications — RSA-4096 + AES-256-GCM encrypted telemetry."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Teracron", email = "sdk@teracron.com" }]
+keywords = ["monitoring", "metrics", "memory", "apm", "telemetry", "teracron", "encrypted"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+dependencies = [
+    "psutil>=5.9",
+    "cryptography>=42.0.4",
+    "requests>=2.32.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "bandit>=1.7",
+]
+
+[project.scripts]
+teracron-agent = "teracron.cli:main"
+
+[project.urls]
+Homepage = "https://www.teracron.com"
+Repository = "https://github.com/teracron/teracron-sdk-python"
+Documentation = "https://docs.teracron.com/sdk/python"
+Changelog = "https://github.com/teracron/teracron-sdk-python/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+include = ["teracron*"]
+
+[tool.setuptools.package-data]
+teracron = ["py.typed"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B110"]
