@@ -7,14 +7,14 @@ name = "teracron-sdk"
 version = "0.1.0"
 description = "Teracron memory metrics agent for Python applications — RSA-4096 + AES-256-GCM encrypted telemetry."
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
 authors = [{ name = "Teracron", email = "sdk@teracron.com" }]
 keywords = ["monitoring", "metrics", "memory", "apm", "telemetry", "teracron", "encrypted"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",

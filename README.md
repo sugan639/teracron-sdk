@@ -151,4 +151,4 @@ Python doesn't have a V8 heap. The SDK maps Python memory concepts to the Teracr
 
 ## License
 
-MIT
+Apache 2.0
