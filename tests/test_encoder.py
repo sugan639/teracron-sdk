@@ -84,10 +84,11 @@ class TestEncodeBatch:
 
     def test_empty_batch_contains_metadata(self):
         """Even with no snapshots, sdk_version and python_version are encoded."""
+        from teracron import __version__
         data = encode_batch([])
         assert len(data) > 0
-        # Should contain sdk_version string "0.1.0"
-        assert b"0.1.0" in data
+        # Should contain the current sdk_version string
+        assert __version__.encode("utf-8") in data
 
     def test_multiple_entries(self):
         snaps = [self._make_snapshot(timestamp=1_700_000_000_000 + i * 1000) for i in range(5)]

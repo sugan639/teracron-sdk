@@ -30,16 +30,44 @@ _PEM_HEADER = "-----BEGIN PUBLIC KEY-----"
 _ALLOWED_DOMAIN_SUFFIX = ".teracron.com"
 _ALLOWED_DOMAINS_EXACT = frozenset({"teracron.com", "www.teracron.com"})
 
+# Auth & query constants
+CREDENTIALS_DIR = ".teracron"
+CREDENTIALS_FILE = "credentials.json"
+API_BASE_PATH = "/v1"
+
 _MIN_INTERVAL_S = 5.0
 _MAX_INTERVAL_S = 300.0
-_DEFAULT_INTERVAL_S = 30.0
+_DEFAULT_INTERVAL_S = 10.0
 
 _DEFAULT_DOMAIN = "www.teracron.com"
-_DEFAULT_MAX_BUFFER = 60
+_DEFAULT_MAX_BUFFER = 10
 _MAX_BUFFER_SIZE = 10_000  # Safety cap: ~1 MB of snapshots max
 _DEFAULT_TIMEOUT_S = 10.0
 _MIN_TIMEOUT_S = 2.0
 _MAX_TIMEOUT_S = 30.0
+
+# Time-based flush ceiling: flush even if buffer isn't full after this many seconds.
+# Prevents data sitting in-memory indefinitely when tick rate is low.
+_DEFAULT_FLUSH_DEADLINE_S = 60.0
+_MIN_FLUSH_DEADLINE_S = 10.0
+_MAX_FLUSH_DEADLINE_S = 600.0
+
+# Tracing defaults
+_DEFAULT_TRACE_BATCH_SIZE = 100
+_MIN_TRACE_BATCH_SIZE = 1
+_MAX_TRACE_BATCH_SIZE = 10_000
+
+_DEFAULT_TRACE_FLUSH_INTERVAL = 10.0
+_MIN_TRACE_FLUSH_INTERVAL = 1.0
+_MAX_TRACE_FLUSH_INTERVAL = 300.0
+
+_DEFAULT_TRACE_SAMPLE_RATE = 1.0  # 100% — capture everything
+_DEFAULT_TRACE_EMIT_EVENTS = False  # Structured event emission (opt-in)
+
+
+def resolve_api_base_url(domain: str) -> str:
+    """Build the API base URL from a domain: ``https://{domain}/v1``."""
+    return f"https://{domain}{API_BASE_PATH}"
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -89,6 +117,11 @@ def _validate_domain(domain: str) -> str:
     )
 
 
+def _parse_bool_env(value: str) -> bool:
+    """Parse a boolean from an environment variable string."""
+    return value.strip().lower() in ("1", "true", "yes")
+
+
 def resolve_config(
     *,
     api_key: Optional[str] = None,
@@ -98,8 +131,15 @@ def resolve_config(
     interval_s: Optional[float] = None,
     max_buffer_size: Optional[int] = None,
     timeout_s: Optional[float] = None,
+    flush_deadline_s: Optional[float] = None,
     debug: Optional[bool] = None,
     target_pid: Optional[int] = None,
+    tracing_enabled: Optional[bool] = None,
+    trace_batch_size: Optional[int] = None,
+    trace_flush_interval: Optional[float] = None,
+    trace_sample_rate: Optional[float] = None,
+    tracing_scrubber=None,
+    trace_emit_events: Optional[bool] = None,
 ) -> ResolvedConfig:
     """
     Validate and resolve configuration.
@@ -203,6 +243,20 @@ def resolve_config(
                 _raw_buffer = None
     resolved_buffer = max(1, min(int(_raw_buffer if _raw_buffer is not None else _DEFAULT_MAX_BUFFER), _MAX_BUFFER_SIZE))
 
+    _raw_flush_deadline = flush_deadline_s
+    if _raw_flush_deadline is None:
+        env_flush_deadline = os.environ.get("TERACRON_FLUSH_DEADLINE")
+        if env_flush_deadline is not None:
+            try:
+                _raw_flush_deadline = float(env_flush_deadline)
+            except ValueError:
+                _raw_flush_deadline = None
+    resolved_flush_deadline = _clamp(
+        _raw_flush_deadline if _raw_flush_deadline is not None else _DEFAULT_FLUSH_DEADLINE_S,
+        _MIN_FLUSH_DEADLINE_S,
+        _MAX_FLUSH_DEADLINE_S,
+    )
+
     _raw_domain = domain or os.environ.get("TERACRON_DOMAIN")
     resolved_domain = _sanitise_domain(_raw_domain) if _raw_domain else _DEFAULT_DOMAIN
     resolved_domain = _validate_domain(resolved_domain)
@@ -221,6 +275,80 @@ def resolve_config(
             except ValueError:
                 _raw_pid = None
 
+    # ── Tracing ──
+    _raw_tracing_enabled = tracing_enabled
+    if _raw_tracing_enabled is None:
+        env_tracing = os.environ.get("TERACRON_TRACING_ENABLED")
+        if env_tracing is not None:
+            _raw_tracing_enabled = _parse_bool_env(env_tracing)
+        else:
+            _raw_tracing_enabled = True
+
+    _raw_trace_batch_size = trace_batch_size
+    if _raw_trace_batch_size is None:
+        env_tbs = os.environ.get("TERACRON_TRACE_BATCH_SIZE")
+        if env_tbs is not None:
+            try:
+                _raw_trace_batch_size = int(env_tbs)
+            except ValueError:
+                _raw_trace_batch_size = None
+    resolved_trace_batch_size = max(
+        _MIN_TRACE_BATCH_SIZE,
+        min(
+            int(_raw_trace_batch_size if _raw_trace_batch_size is not None else _DEFAULT_TRACE_BATCH_SIZE),
+            _MAX_TRACE_BATCH_SIZE,
+        ),
+    )
+
+    _raw_trace_flush_interval = trace_flush_interval
+    if _raw_trace_flush_interval is None:
+        env_tfi = os.environ.get("TERACRON_TRACE_FLUSH_INTERVAL")
+        if env_tfi is not None:
+            try:
+                _raw_trace_flush_interval = float(env_tfi)
+            except ValueError:
+                _raw_trace_flush_interval = None
+    resolved_trace_flush_interval = _clamp(
+        _raw_trace_flush_interval if _raw_trace_flush_interval is not None else _DEFAULT_TRACE_FLUSH_INTERVAL,
+        _MIN_TRACE_FLUSH_INTERVAL,
+        _MAX_TRACE_FLUSH_INTERVAL,
+    )
+
+    # ── Sampling ──
+    _raw_sample_rate = trace_sample_rate
+    if _raw_sample_rate is None:
+        env_sr = os.environ.get("TERACRON_TRACE_SAMPLE_RATE")
+        if env_sr is not None:
+            try:
+                _raw_sample_rate = float(env_sr)
+            except ValueError:
+                _raw_sample_rate = None
+    resolved_sample_rate = _clamp(
+        _raw_sample_rate if _raw_sample_rate is not None else _DEFAULT_TRACE_SAMPLE_RATE,
+        0.0,
+        1.0,
+    )
+
+    # ── PII Scrubber ──
+    resolved_scrubber = None
+    if tracing_scrubber is not None:
+        if callable(tracing_scrubber):
+            resolved_scrubber = tracing_scrubber
+        else:
+            raise ValueError(
+                "[Teracron] tracing_scrubber must be a callable (function) "
+                "that accepts a dict and returns a dict, or None."
+            )
+
+    # ── Trace event emission ──
+    _raw_emit_events = trace_emit_events
+    if _raw_emit_events is None:
+        env_emit = os.environ.get("TERACRON_TRACE_EMIT_EVENTS")
+        if env_emit is not None:
+            _raw_emit_events = _parse_bool_env(env_emit)
+        else:
+            _raw_emit_events = _DEFAULT_TRACE_EMIT_EVENTS
+
     return ResolvedConfig(
         project_slug=slug,
         public_key=key,
@@ -228,6 +356,13 @@ def resolve_config(
         interval_s=resolved_interval,
         max_buffer_size=resolved_buffer,
         timeout_s=resolved_timeout,
+        flush_deadline_s=resolved_flush_deadline,
         debug=bool(_raw_debug),
         target_pid=_raw_pid,
+        tracing_enabled=bool(_raw_tracing_enabled),
+        trace_batch_size=resolved_trace_batch_size,
+        trace_flush_interval=resolved_trace_flush_interval,
+        trace_sample_rate=resolved_sample_rate,
+        tracing_scrubber=resolved_scrubber,
+        trace_emit_events=bool(_raw_emit_events),
     )

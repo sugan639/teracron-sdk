@@ -108,6 +108,33 @@ class TestTeracronClientCollection:
         assert client._thread.daemon is True
         client.stop()
 
+    @mock.patch("teracron.client.Transport")
+    @mock.patch("teracron.client.encrypt_envelope", return_value=b"encrypted")
+    @mock.patch("teracron.client.encode_batch", return_value=b"encoded")
+    def test_time_based_flush_triggers(self, _enc_batch, _enc_env, MockTransport):
+        """Flush fires when deadline is exceeded, even if buffer is not full."""
+        mock_transport = MockTransport.return_value
+        mock_transport.send.return_value = mock.Mock(success=True, status_code=202)
+
+        client = TeracronClient(
+            api_key=_VALID_API_KEY,
+            interval_s=5.0,
+            max_buffer_size=1000,       # Very large — buffer won't fill
+            flush_deadline_s=10.0,      # Short deadline for test
+        )
+        client.start()
+        assert client._config.flush_deadline_s == 10.0
+
+        # Force _last_flush_time into the past to simulate deadline exceeded
+        client._last_flush_time = time.monotonic() - 15.0
+
+        # Wait for one tick cycle to trigger the deadline flush
+        time.sleep(6.0)
+
+        # Transport.send should have been called at least once via deadline flush
+        assert mock_transport.send.call_count >= 1
+        client.stop()
+
 
 class TestUpDown:
     """Tests for the module-level up()/down() singleton API."""

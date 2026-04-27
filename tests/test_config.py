@@ -24,9 +24,10 @@ class TestResolveConfigApiKey:
         assert cfg.project_slug == _VALID_SLUG
         assert cfg.public_key == _VALID_PEM
         assert cfg.domain == "www.teracron.com"
-        assert cfg.interval_s == 30.0
-        assert cfg.max_buffer_size == 60
+        assert cfg.interval_s == 10.0
+        assert cfg.max_buffer_size == 10
         assert cfg.timeout_s == 10.0
+        assert cfg.flush_deadline_s == 60.0
         assert cfg.debug is False
         assert cfg.target_pid is None
 
@@ -76,9 +77,10 @@ class TestResolveConfigLegacy:
         cfg = resolve_config(project_slug=_VALID_SLUG, public_key=_VALID_PEM)
         assert cfg.project_slug == _VALID_SLUG
         assert cfg.domain == "www.teracron.com"
-        assert cfg.interval_s == 30.0
-        assert cfg.max_buffer_size == 60
+        assert cfg.interval_s == 10.0
+        assert cfg.max_buffer_size == 10
         assert cfg.timeout_s == 10.0
+        assert cfg.flush_deadline_s == 60.0
         assert cfg.debug is False
         assert cfg.target_pid is None
 
@@ -155,6 +157,31 @@ class TestResolveConfigBounds:
     def test_target_pid(self):
         cfg = resolve_config(api_key=_VALID_API_KEY, target_pid=12345)
         assert cfg.target_pid == 12345
+
+    def test_flush_deadline_default(self):
+        cfg = resolve_config(api_key=_VALID_API_KEY)
+        assert cfg.flush_deadline_s == 60.0
+
+    def test_flush_deadline_custom(self):
+        cfg = resolve_config(api_key=_VALID_API_KEY, flush_deadline_s=30.0)
+        assert cfg.flush_deadline_s == 30.0
+
+    def test_flush_deadline_clamped_min(self):
+        cfg = resolve_config(api_key=_VALID_API_KEY, flush_deadline_s=1.0)
+        assert cfg.flush_deadline_s == 10.0
+
+    def test_flush_deadline_clamped_max(self):
+        cfg = resolve_config(api_key=_VALID_API_KEY, flush_deadline_s=9999.0)
+        assert cfg.flush_deadline_s == 600.0
+
+    def test_flush_deadline_from_env(self):
+        env = {
+            "TERACRON_API_KEY": _VALID_API_KEY,
+            "TERACRON_FLUSH_DEADLINE": "120",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            cfg = resolve_config()
+            assert cfg.flush_deadline_s == 120.0
 
 
 class TestDomainValidation:

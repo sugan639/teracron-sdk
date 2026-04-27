@@ -4,3 +4,8 @@ include CHANGELOG.md
 include pyproject.toml
 recursive-include teracron *.py py.typed
 global-exclude __pycache__ *.pyc *.pyo *.egg-info
+prune tests
+prune .github
+prune .pytest_cache
+exclude PLAN_WORKFLOW_TRACING.md
+exclude setup.py

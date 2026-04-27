@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "teracron-sdk"
-version = "0.1.0"
+version = "0.6.0"
 description = "Teracron memory metrics agent for Python applications — RSA-4096 + AES-256-GCM encrypted telemetry."
 readme = "README.md"
 license = { text = "Apache-2.0" }
-requires-python = ">=3.9"
+requires-python = ">=3.8"
 authors = [{ name = "Teracron", email = "sdk@teracron.com" }]
 keywords = ["monitoring", "metrics", "memory", "apm", "telemetry", "teracron", "encrypted"]
 classifiers = [
@@ -48,9 +48,10 @@ Changelog = "https://github.com/teracron/teracron-sdk-python/blob/main/CHANGELOG
 
 [tool.setuptools.packages.find]
 include = ["teracron*"]
+exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-teracron = ["py.typed"]
+teracron = ["py.typed", ".agent-skill.md", "tracing/.agent-skill.md"]
 
 [tool.bandit]
 exclude_dirs = ["tests"]

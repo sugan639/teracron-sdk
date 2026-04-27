@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import atexit
 import collections
+import json
 import sys
 import threading
 import time
@@ -50,7 +51,7 @@ from .config import resolve_config
 from .crypto import encrypt_envelope
 from .encoder import encode_batch
 from .transport import Transport
-from .types import FlushResult, MetricsSnapshot, ResolvedConfig
+from .types import FlushResult, MetricsSnapshot, ResolvedConfig, TraceFlushResult
 
 
 class TeracronClient:
@@ -79,6 +80,15 @@ class TeracronClient:
         "_thread",
         "_started",
         "_tick_count",
+        "_last_flush_time",
+        # Tracing
+        "_trace_buffer",
+        "_trace_lock",
+        "_trace_overflow_warned",
+        "_last_trace_flush_time",
+        "_scrubber",
+        # Structured events (Phase 4)
+        "_event_buffer",
     )
 
     def __init__(
@@ -91,8 +101,14 @@ class TeracronClient:
         interval_s: Optional[float] = None,
         max_buffer_size: Optional[int] = None,
         timeout_s: Optional[float] = None,
+        flush_deadline_s: Optional[float] = None,
         debug: Optional[bool] = None,
         target_pid: Optional[int] = None,
+        tracing_enabled: Optional[bool] = None,
+        trace_batch_size: Optional[int] = None,
+        trace_flush_interval: Optional[float] = None,
+        trace_sample_rate: Optional[float] = None,
+        tracing_scrubber=None,
     ) -> None:
         self._config = resolve_config(
             api_key=api_key,
@@ -102,8 +118,14 @@ class TeracronClient:
             interval_s=interval_s,
             max_buffer_size=max_buffer_size,
             timeout_s=timeout_s,
+            flush_deadline_s=flush_deadline_s,
             debug=debug,
             target_pid=target_pid,
+            tracing_enabled=tracing_enabled,
+            trace_batch_size=trace_batch_size,
+            trace_flush_interval=trace_flush_interval,
+            trace_sample_rate=trace_sample_rate,
+            tracing_scrubber=tracing_scrubber,
         )  # type: ResolvedConfig
         self._collector = None  # type: Optional[Collector]
         self._transport = None  # type: Optional[Transport]
@@ -113,6 +135,22 @@ class TeracronClient:
         self._thread = None  # type: Optional[threading.Thread]
         self._started = False
         self._tick_count = 0
+        self._last_flush_time = 0.0  # monotonic; set on first start
+
+        # Tracing
+        self._trace_buffer = collections.deque(
+            maxlen=self._config.trace_batch_size,
+        )  # type: ignore[assignment]
+        self._trace_lock = threading.Lock()
+        self._trace_overflow_warned = False
+        self._last_trace_flush_time = 0.0
+        self._scrubber = self._config.tracing_scrubber
+
+        # Structured events (Phase 4) — initialise only when event emission is enabled.
+        self._event_buffer = None
+        if self._config.trace_emit_events:
+            from .tracing.events import EventBuffer
+            self._event_buffer = EventBuffer(capacity=500)
 
     # ── Public API ──
 
@@ -139,6 +177,8 @@ class TeracronClient:
 
         self._stop_event.clear()
         self._started = True
+        self._last_flush_time = time.monotonic()
+        self._last_trace_flush_time = time.monotonic()
 
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -175,8 +215,9 @@ class TeracronClient:
             self._thread.join(timeout=5.0)
             self._thread = None
 
-        # Final flush
+        # Final flushes — metrics then traces
         self._flush()
+        self._flush_traces()
 
         if self._transport is not None:
             self._transport.close()
@@ -229,19 +270,30 @@ class TeracronClient:
 
         snapshot = self._collector.collect()
 
+        now = time.monotonic()
         should_flush = False
         with self._lock:
             self._buffer.append(snapshot)  # deque(maxlen) auto-drops oldest
             self._tick_count += 1
-            if (
+
+            buffer_full = (
                 self._tick_count >= self._config.max_buffer_size
                 or len(self._buffer) >= self._config.max_buffer_size
-            ):
+            )
+            deadline_exceeded = (
+                len(self._buffer) > 0
+                and (now - self._last_flush_time) >= self._config.flush_deadline_s
+            )
+
+            if buffer_full or deadline_exceeded:
                 should_flush = True
                 self._tick_count = 0
 
         if should_flush:
             self._flush()
+
+        # ── Trace flush check ──
+        self._maybe_flush_traces()
 
     def _flush(self) -> Optional[FlushResult]:
         """Drain buffer → encode → encrypt → send. Never raises."""
@@ -250,6 +302,7 @@ class TeracronClient:
                 return None
             batch = list(self._buffer)
             self._buffer.clear()
+            self._last_flush_time = time.monotonic()
 
         if self._transport is None:
             return None
@@ -279,6 +332,85 @@ class TeracronClient:
             sys.stderr.write("[teracron] %s\n" % msg)
             sys.stderr.flush()
 
+    # ── Tracing ──
+
+    def _push_trace_span(self, span_dict: dict) -> None:
+        """
+        Append a span dict to the trace buffer.
+
+        Ring buffer (``collections.deque(maxlen=N)``) auto-drops the oldest
+        entry when full.  A single warning is emitted on the first overflow.
+
+        Called from the ``@trace`` decorator on the application thread.
+        """
+        with self._trace_lock:
+            if (
+                len(self._trace_buffer) >= self._config.trace_batch_size
+                and not self._trace_overflow_warned
+            ):
+                sys.stderr.write(
+                    "[teracron] Trace buffer full — dropping oldest spans.\n"
+                )
+                sys.stderr.flush()
+                self._trace_overflow_warned = True
+            self._trace_buffer.append(span_dict)
+
+    def _maybe_flush_traces(self) -> None:
+        """Check if a trace flush is needed (batch-size or deadline)."""
+        now = time.monotonic()
+        should_flush = False
+
+        with self._trace_lock:
+            buffer_len = len(self._trace_buffer)
+            if buffer_len == 0:
+                return
+            batch_full = buffer_len >= self._config.trace_batch_size
+            deadline_exceeded = (
+                (now - self._last_trace_flush_time)
+                >= self._config.trace_flush_interval
+            )
+            if batch_full or deadline_exceeded:
+                should_flush = True
+
+        if should_flush:
+            self._flush_traces()
+
+    def _flush_traces(self) -> Optional[TraceFlushResult]:
+        """Drain trace buffer → JSON encode → encrypt → send. Never raises."""
+        with self._trace_lock:
+            if not self._trace_buffer:
+                return None
+            batch = list(self._trace_buffer)
+            self._trace_buffer.clear()
+            self._last_trace_flush_time = time.monotonic()
+
+        if self._transport is None:
+            return None
+
+        try:
+            payload = {
+                "type": "trace",
+                "project_slug": self._config.project_slug,
+                "spans": batch,
+            }
+            raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            envelope = encrypt_envelope(raw, self._config.public_key)
+            result = self._transport.send_traces(envelope)
+
+            flush_result = TraceFlushResult(
+                sent=len(batch),
+                status_code=result.status_code,
+                success=result.success,
+            )
+            self._debug(
+                "Trace flush: sent=%d status=%d ok=%s"
+                % (flush_result.sent, flush_result.status_code, flush_result.success)
+            )
+            return flush_result
+        except Exception as exc:
+            self._debug("Trace flush failed: %s" % exc)
+            return TraceFlushResult(sent=0, status_code=0, success=False)
+
 
 # ── Module-level singleton API ──
 # ``teracron.up()`` / ``teracron.down()`` — zero-ceremony interface.
@@ -294,8 +426,14 @@ def up(
     interval_s: Optional[float] = None,
     max_buffer_size: Optional[int] = None,
     timeout_s: Optional[float] = None,
+    flush_deadline_s: Optional[float] = None,
     debug: Optional[bool] = None,
     target_pid: Optional[int] = None,
+    tracing_enabled: Optional[bool] = None,
+    trace_batch_size: Optional[int] = None,
+    trace_flush_interval: Optional[float] = None,
+    trace_sample_rate: Optional[float] = None,
+    tracing_scrubber=None,
 ) -> TeracronClient:
     """
     Start Teracron telemetry in one call.
@@ -327,8 +465,14 @@ def up(
             interval_s=interval_s,
             max_buffer_size=max_buffer_size,
             timeout_s=timeout_s,
+            flush_deadline_s=flush_deadline_s,
             debug=debug,
             target_pid=target_pid,
+            tracing_enabled=tracing_enabled,
+            trace_batch_size=trace_batch_size,
+            trace_flush_interval=trace_flush_interval,
+            trace_sample_rate=trace_sample_rate,
+            tracing_scrubber=tracing_scrubber,
         )
         client.start()
         _singleton = client

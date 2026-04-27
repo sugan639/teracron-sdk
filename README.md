@@ -29,6 +29,176 @@ That's it. One env var, one line of code. Metrics flow in a background daemon th
 
 ---
 
+## Workflow Tracing
+
+Track method execution across your application with the `@trace` decorator. Captures timing, success/failure, exceptions, and nested call trees — ships structured spans to Teracron.
+
+### Basic Usage
+
+```python
+import teracron
+from teracron import trace
+
+teracron.up()
+
+@trace("payment")
+def create_order(cart):
+    ...
+
+@trace("payment")
+async def charge_card(order_id, amount):
+    ...
+
+@trace("payment")
+def send_receipt(order_id):
+    ...
+```
+
+Each decorated function produces a **span** — when an exception occurs, the span records `error_type` and `error_message` automatically. **Exceptions are never swallowed** — they always re-raise.
+
+### Nested Spans (Parent-Child)
+
+Nested `@trace` calls automatically build a call tree with `parent_span_id`:
+
+```python
+@trace("payment")
+def process_payment(cart):
+    order = create_order(cart)          # child span
+    charge_card(order.id, cart.total)   # child span
+    send_receipt(order.id)              # child span
+```
+
+All spans in the same call chain share a `trace_id`. The Teracron dashboard renders this as a waterfall timeline.
+
+### Parameter Capture (Opt-In)
+
+**By default, NO function parameter values are sent to Teracron.** Only basic flow data (timing, status, errors) is traced. To capture specific parameter values, explicitly whitelist them:
+
+```python
+@trace("payment", capture=["order_id", "amount"])
+def charge_card(order_id, amount, card_number):
+    # order_id and amount are captured — card_number is NOT
+    ...
+```
+
+This is the **PII safety boundary** — sensitive data like passwords, tokens, and card numbers are never sent unless you explicitly list them in `capture=[...]`.
+
+### Context Manager
+
+For tracing non-function code blocks, use the context manager:
+
+```python
+from teracron import trace_context, async_trace_context
+
+with trace_context("payment", operation="validate") as span:
+    span.set_metadata({"order_id": "ORD-123", "region": "us-east"})
+    validate_order(order)
+
+# Async version
+async with async_trace_context("payment", operation="verify") as span:
+    span.set_metadata({"txn_id": "T-001"})
+    await verify_payment(txn)
+```
+
+### Cross-Process Propagation
+
+Propagate trace context across HTTP boundaries (microservices, Celery, etc.):
+
+```python
+from teracron import get_trace_header, set_trace_header
+
+# Service A — outbound request
+headers["X-Teracron-Trace"] = get_trace_header()
+
+# Service B — inbound request
+set_trace_header(request.headers.get("X-Teracron-Trace"))
+```
+
+### Sampling
+
+Control what percentage of traces are recorded. Decision is deterministic per `trace_id` — same trace always gets the same decision across services.
+
+```python
+teracron.up(trace_sample_rate=0.1)  # Record 10% of traces
+```
+
+When a trace is not sampled, functions still execute normally and exceptions still propagate. Only telemetry recording is skipped — zero overhead for non-sampled traces.
+
+### PII Scrubber
+
+Provide a callable to scrub sensitive data from metadata and captured params before they leave your application:
+
+```python
+def my_scrubber(data: dict) -> dict:
+    data.pop("email", None)
+    data.pop("ssn", None)
+    data.pop("auth_token", None)
+    return data
+
+teracron.up(tracing_scrubber=my_scrubber)
+```
+
+The scrubber receives a **shallow copy** of the data dict — your original data is never mutated. If the scrubber raises an exception, the data is **dropped entirely** (never leaked).
+
+### Framework Auto-Instrumentation
+
+#### FastAPI / Starlette
+
+```python
+from fastapi import FastAPI
+from teracron.tracing.middleware.fastapi import TeracronTracingMiddleware
+
+app = FastAPI()
+app.add_middleware(TeracronTracingMiddleware, workflow="api")
+```
+
+Auto-traces every HTTP request with `http.method`, `http.path`, and `http.status_code` metadata. Extracts/injects `X-Teracron-Trace` headers automatically.
+
+#### Django
+
+```python
+# settings.py
+MIDDLEWARE = [
+    "teracron.tracing.middleware.django.TeracronTracingMiddleware",
+    # ... other middleware
+]
+TERACRON_WORKFLOW = "api"  # optional, default: "http"
+```
+
+#### Celery
+
+```python
+from celery import Celery
+from teracron.tracing.middleware.celery import setup_celery_tracing
+
+app = Celery("tasks")
+setup_celery_tracing(app, workflow="tasks")
+```
+
+Propagates trace context through task headers. Auto-creates a span per task execution with `celery.task_id` metadata.
+
+### Tracing Configuration
+
+| Parameter | Env Variable | Default | Description |
+|---|---|---|---|
+| `tracing_enabled` | `TERACRON_TRACING_ENABLED` | `true` | Master kill-switch for tracing |
+| `trace_batch_size` | `TERACRON_TRACE_BATCH_SIZE` | `100` | Max spans buffered before flush (1–10,000) |
+| `trace_flush_interval` | `TERACRON_TRACE_FLUSH_INTERVAL` | `10` | Seconds between trace flushes (1–300) |
+| `trace_sample_rate` | `TERACRON_TRACE_SAMPLE_RATE` | `1.0` | Sampling rate (0.0–1.0). Deterministic per trace. |
+| `tracing_scrubber` | — | `None` | Callable for PII scrubbing. Applied before buffering. |
+
+```python
+teracron.up(
+    tracing_enabled=True,
+    trace_batch_size=50,
+    trace_flush_interval=5.0,
+    trace_sample_rate=0.5,
+    tracing_scrubber=my_scrubber,
+)
+```
+
+---
+
 ## Standalone Agent (sidecar)
 
 Run alongside your web server without touching app code:
@@ -45,8 +215,9 @@ teracron-agent
 |---|---|---|---|
 | `api_key` | `TERACRON_API_KEY` | *required* | API key from dashboard (encodes slug + public key) |
 | `domain` | `TERACRON_DOMAIN` | `www.teracron.com` | Ingest endpoint domain |
-| `interval_s` | `TERACRON_INTERVAL` | `30` | Collection interval in seconds (5–300) |
-| `max_buffer_size` | `TERACRON_MAX_BUFFER` | `60` | Max buffered snapshots before flush |
+| `interval_s` | `TERACRON_INTERVAL` | `10` | Collection interval in seconds (5–300) |
+| `max_buffer_size` | `TERACRON_MAX_BUFFER` | `10` | Max buffered snapshots before flush |
+| `flush_deadline_s` | `TERACRON_FLUSH_DEADLINE` | `60` | Max seconds before forcing a flush (10–600) |
 | `timeout_s` | `TERACRON_TIMEOUT` | `10` | HTTP request timeout in seconds (2–30) |
 | `debug` | `TERACRON_DEBUG` | `false` | Enable debug logging to stderr |
 | `target_pid` | `TERACRON_TARGET_PID` | `None` (self) | PID of target process to monitor |
@@ -54,7 +225,7 @@ teracron-agent
 Pass overrides to `up()` if needed:
 
 ```python
-teracron.up(interval_s=10, debug=True)
+teracron.up(interval_s=15, debug=True)
 ```
 
 ## API Reference

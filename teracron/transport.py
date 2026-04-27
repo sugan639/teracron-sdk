@@ -83,12 +83,26 @@ class Transport:
 
     def send(self, envelope: bytes) -> TransportResult:
         """
-        Send an encrypted envelope. Never raises — returns TransportResult.
+        Send an encrypted metrics envelope. Never raises — returns TransportResult.
         """
+        return self._post(self._url, envelope)
+
+    def send_traces(self, envelope: bytes) -> TransportResult:
+        """
+        Send an encrypted trace envelope to ``POST /v1/traces``.
+
+        Reuses the same ``requests.Session`` (shared keep-alive pool)
+        but targets the dedicated traces endpoint.  Never raises.
+        """
+        traces_url = self._url.replace("/api/ingest", "/v1/traces")
+        return self._post(traces_url, envelope)
+
+    def _post(self, url: str, data: bytes) -> TransportResult:
+        """Common POST logic — never raises."""
         try:
             resp = self._session.post(
-                self._url,
-                data=envelope,
+                url,
+                data=data,
                 timeout=self._timeout,
                 allow_redirects=False,
             )
@@ -101,6 +115,20 @@ class Transport:
         except Exception:
             # Defensive: catch-all for unexpected errors (SSL, OS-level, etc.)
             return TransportResult(success=False, status_code=0)
+
+    def send_events(self, payload: bytes) -> TransportResult:
+        """
+        Send structured workflow events to ``POST /v1/events``.
+
+        Reuses the same ``requests.Session``.  Never raises.
+        """
+        events_url = self._url.replace("/api/ingest", "/v1/events")
+        return self._post(events_url, payload)
+
+    @property
+    def query_base_url(self) -> str:
+        """Base URL for query endpoints: ``https://{domain}/v1``."""
+        return self._url.replace("/api/ingest", "/v1")
 
     def close(self) -> None:
         """Release the underlying connection pool."""
