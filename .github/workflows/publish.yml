@@ -45,7 +45,7 @@ jobs:
         run: python -m pytest tests/ -v --tb=short
 
       - name: Security scan (bandit)
-        run: bandit -r teracron/ -c pyproject.toml -q
+        run: bandit -r teracron/ -q
 
   # ── Build sdist + wheel ────────────────────────────────────────────
   build:
