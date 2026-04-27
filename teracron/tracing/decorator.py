@@ -187,7 +187,7 @@ def _emit_start_event(client: Any, span: Any, is_root: bool) -> None:
             )
         if evt:
             event_buffer.push(evt)
-    except Exception:  # nosec B110 — telemetry; never crash user code
+    except Exception:  # nosec B110
         pass
 
 
@@ -306,7 +306,7 @@ def _emit_end_event(
             )
         if evt:
             event_buffer.push(evt)
-    except Exception:  # nosec B110 — telemetry; never crash user code
+    except Exception:  # nosec B110
         pass
 
 

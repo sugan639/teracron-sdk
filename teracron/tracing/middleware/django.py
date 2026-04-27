@@ -60,7 +60,7 @@ class TeracronTracingMiddleware:
         try:
             from django.conf import settings
             self.workflow = getattr(settings, "TERACRON_WORKFLOW", "http")
-        except Exception:  # nosec B110 — settings import may fail outside Django
+        except Exception:  # nosec B110
             pass
 
     def __call__(self, request: Any) -> Any:

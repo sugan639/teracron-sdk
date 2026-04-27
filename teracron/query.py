@@ -263,5 +263,5 @@ class TeracronQueryClient:
         """Release the underlying connection pool."""
         try:
             self._session.close()
-        except Exception:  # nosec B110 — teardown; nothing actionable on failure
+        except Exception:  # nosec B110
             pass

@@ -20,8 +20,16 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import sys
 from contextvars import ContextVar
 from typing import Optional
+
+# Python ≥3.9 supports usedforsecurity=False, which satisfies FIPS-mode
+# OpenSSL and static analysers (Bandit B324).  On 3.8 we fall back to the
+# plain call — MD5 is never used for a security purpose here.
+_MD5_KWARGS: dict = (
+    {"usedforsecurity": False} if sys.version_info >= (3, 9) else {}
+)
 
 # Max unsigned 64-bit integer — comparison ceiling for rate threshold.
 _MAX_UINT64 = (1 << 64) - 1
@@ -59,7 +67,9 @@ def should_sample(trace_id: str, rate: float) -> bool:
 
     # MD5 → first 8 bytes → uint64 (big-endian).
     # NOT cryptographic — used solely for uniform hash distribution in sampling.
-    digest = hashlib.md5(trace_id.encode("ascii", errors="replace")).digest()  # nosec B303
+    digest = hashlib.md5(  # nosec B303 B324
+        trace_id.encode("ascii", errors="replace"), **_MD5_KWARGS
+    ).digest()
     hash_val = struct.unpack(">Q", digest[:8])[0]
 
     threshold = int(rate * _MAX_UINT64)
