@@ -64,7 +64,7 @@ Standalone CLI agent::
     $ teracron-agent
 """
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 from .client import TeracronClient, up, down
 from .apikey import encode_api_key, decode_api_key

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "teracron-sdk"
-version = "0.6.0"
+version = "0.6.1"
 description = "Teracron memory metrics agent for Python applications — RSA-4096 + AES-256-GCM encrypted telemetry."
 readme = "README.md"
 license = { text = "Apache-2.0" }

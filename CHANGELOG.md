@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-04-27
+
+### Fixed
+- **Bandit B324 false positive** — added `usedforsecurity=False` to `hashlib.md5()` in `teracron/tracing/sampling.py` (Python ≥3.9) and dual `# nosec B303 B324` suppression for cross-version Bandit compatibility.
+- Fixed nosec annotations across `query.py`, `transport.py`, `decorator.py`, and `middleware/django.py` for CI compatibility with Bandit ≥1.8.
+
 ## [0.5.0] - 2025-07-21
 
 ### Added
