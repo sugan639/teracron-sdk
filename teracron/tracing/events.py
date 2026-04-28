@@ -6,7 +6,7 @@ Events are distinct from spans:
     - **Spans** represent durations (start → end).
     - **Events** represent discrete moments (step_started, step_failed, retry, etc.)
 
-Events are buffered alongside traces and shipped to ``POST /v1/events``.
+Events are buffered alongside traces and shipped to ``POST /api/v1/events``.
 Auto-emitted by the ``@trace`` decorator when ``trace_emit_events=True``.
 
 Event types:

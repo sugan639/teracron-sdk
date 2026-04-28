@@ -55,7 +55,7 @@ class TestQueryClientDomainValidation:
         client = TeracronQueryClient(
             api_key="tcn_test", domain="https://www.teracron.com/extra"
         )
-        assert client._base_url == "https://www.teracron.com/v1"
+        assert client._base_url == "https://www.teracron.com/api/v1"
         client.close()
 
     def test_custom_domain_with_env_bypass(self):

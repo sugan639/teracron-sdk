@@ -89,12 +89,12 @@ class Transport:
 
     def send_traces(self, envelope: bytes) -> TransportResult:
         """
-        Send an encrypted trace envelope to ``POST /v1/traces``.
+        Send an encrypted trace envelope to ``POST /api/v1/traces``.
 
         Reuses the same ``requests.Session`` (shared keep-alive pool)
         but targets the dedicated traces endpoint.  Never raises.
         """
-        traces_url = self._url.replace("/api/ingest", "/v1/traces")
+        traces_url = self._url.replace("/api/ingest", "/api/v1/traces")
         return self._post(traces_url, envelope)
 
     def _post(self, url: str, data: bytes) -> TransportResult:
@@ -118,17 +118,17 @@ class Transport:
 
     def send_events(self, payload: bytes) -> TransportResult:
         """
-        Send structured workflow events to ``POST /v1/events``.
+        Send structured workflow events to ``POST /api/v1/events``.
 
         Reuses the same ``requests.Session``.  Never raises.
         """
-        events_url = self._url.replace("/api/ingest", "/v1/events")
+        events_url = self._url.replace("/api/ingest", "/api/v1/events")
         return self._post(events_url, payload)
 
     @property
     def query_base_url(self) -> str:
-        """Base URL for query endpoints: ``https://{domain}/v1``."""
-        return self._url.replace("/api/ingest", "/v1")
+        """Base URL for query endpoints: ``https://{domain}/api/v1``."""
+        return self._url.replace("/api/ingest", "/api/v1")
 
     def close(self) -> None:
         """Release the underlying connection pool."""

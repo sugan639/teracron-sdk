@@ -33,7 +33,7 @@ _ALLOWED_DOMAINS_EXACT = frozenset({"teracron.com", "www.teracron.com"})
 # Auth & query constants
 CREDENTIALS_DIR = ".teracron"
 CREDENTIALS_FILE = "credentials.json"
-API_BASE_PATH = "/v1"
+API_BASE_PATH = "/api/v1"
 
 _MIN_INTERVAL_S = 5.0
 _MAX_INTERVAL_S = 300.0

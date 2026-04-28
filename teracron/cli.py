@@ -531,23 +531,23 @@ def _cmd_curl_example(args: argparse.Namespace) -> None:
 
 # 1. List recent failed events
 curl -s -H "Authorization: Bearer {key_placeholder}" \\
-  "https://{domain}/v1/events?status=failed&limit=10"
+  "https://{domain}/api/v1/events?status=failed&limit=10"
 
 # 2. List events for a specific workflow
 curl -s -H "Authorization: Bearer {key_placeholder}" \\
-  "https://{domain}/v1/events?workflow=payment&limit=20"
+  "https://{domain}/api/v1/events?workflow=payment&limit=20"
 
 # 3. Get a full trace span tree
 curl -s -H "Authorization: Bearer {key_placeholder}" \\
-  "https://{domain}/v1/traces/<TRACE_ID>"
+  "https://{domain}/api/v1/traces/<TRACE_ID>"
 
 # 4. List workflow summaries
 curl -s -H "Authorization: Bearer {key_placeholder}" \\
-  "https://{domain}/v1/workflows?limit=20"
+  "https://{domain}/api/v1/workflows?limit=20"
 
 # 5. Get a single span detail
 curl -s -H "Authorization: Bearer {key_placeholder}" \\
-  "https://{domain}/v1/spans/<SPAN_ID>"
+  "https://{domain}/api/v1/spans/<SPAN_ID>"
 
 # 6. Auth check (whoami)
 curl -s -H "Authorization: Bearer {key_placeholder}" \\

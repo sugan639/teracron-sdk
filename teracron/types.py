@@ -63,7 +63,7 @@ class Span:
     ``dataclasses.replace()`` to produce updated copies (e.g. on
     finalisation).
 
-    Fields mirror the ``POST /v1/traces`` payload schema.
+    Fields mirror the ``POST /api/v1/traces`` payload schema.
     """
 
     trace_id: str  # 32-char hex — groups spans in one workflow execution

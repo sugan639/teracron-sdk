@@ -171,8 +171,8 @@ class TestCurlExampleCommand:
 
         output = stdout.getvalue()
         assert "curl" in output
-        assert "/v1/events" in output
-        assert "/v1/traces" in output
+        assert "/api/v1/events" in output
+        assert "/api/v1/traces" in output
         assert "Authorization: Bearer" in output
 
 

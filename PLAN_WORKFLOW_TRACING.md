@@ -1,18 +1,85 @@
 # Teracron Workflow Tracing — Implementation Plan
 
-> **Version:** 0.6  
-> **Date:** 2025-01-20 (updated 2025-07-21)  
-> **SDK Target:** teracron-sdk `0.6.0` (current release)
-> **Backend Target:** teracron `TBD`
-> **Status:** Phase 1 ✅ Phase 2 ✅ Phase 3 ✅ Phase 4 ✅ — SDK agent-ready
+> **Version:** 0.7  
+> **Date:** 2025-01-20 (updated 2025-07-22)  
+> **SDK:** `teracron-sdk 0.6.x` — ✅ Published to PyPI  
+> **Backend:** `teracron` (Convex + Next.js) — 🔲 Phase 5–8 pending  
+> **Status:** Phase 1 ✅ Phase 2 ✅ Phase 3 ✅ Phase 4 ✅ Phase 5 🔲 Phase 6 🔲 Phase 7 🔲 Phase 8 🔲
 
 ---
 
-## Target
+## Summary
 
-A `@trace("workflow_name")` decorator that captures method execution flow (timing, success/failure, exceptions) and ships structured span data to Teracron — giving users a clean process timeline instead of digging through logs.
+The SDK (`teracron-sdk 0.6.x`) is published and ships traces + events. The backend (`teracron`) has **no support** for receiving, storing, or querying that data yet. Phases 5–8 implement the backend data layer, ingest endpoints, query API, and dashboard UI.
 
-**Not building:** a general-purpose APM, an OpenTelemetry replacement, or a log aggregator.
+---
+
+## SDK Wire Format Reference
+
+The SDK sends two types of encrypted payloads. Both use `RSA-4096 + AES-256-GCM` envelope encryption, identical to the existing metrics ingest.
+
+### Trace Payload — `POST /v1/traces`
+
+```
+Header:  X-Project-Slug: <slug>
+         Content-Type: application/octet-stream
+Body:    RSA-OAEP encrypted envelope → decrypts to JSON:
+```
+
+```json
+{
+  "type": "trace",
+  "project_slug": "vivid-kudu-655",
+  "spans": [
+    {
+      "trace_id": "32-char hex",
+      "span_id": "32-char hex",
+      "parent_span_id": "32-char hex | null",
+      "workflow": "payment",
+      "operation": "PaymentService.charge_card",
+      "status": "succeeded | failed | started",
+      "started_at": 1721500000000,
+      "duration_ms": 142.5,
+      "error_type": "ValueError | null",
+      "error_message": "max 1024 chars | null",
+      "metadata": { "max 32 keys, primitives only" },
+      "captured_params": { "max 32 keys, 512-char values" }
+    }
+  ]
+}
+```
+
+### Event Payload — `POST /v1/events`
+
+```json
+{
+  "type": "event",
+  "project_slug": "vivid-kudu-655",
+  "events": [
+    {
+      "type": "workflow_started | workflow_completed | workflow_failed | step_started | step_completed | step_failed | retry",
+      "workflow": "payment",
+      "trace_id": "32-char hex",
+      "span_id": "32-char hex",
+      "operation": "PaymentService.charge_card",
+      "severity": "info | warning | error | critical",
+      "timestamp": 1721500000000,
+      "error_type": "ValueError | null (failure events only)",
+      "error_message": "max 512 chars | null",
+      "metadata": { "max 16 keys, primitives only" }
+    }
+  ]
+}
+```
+
+### Query Endpoints (SDK `TeracronQueryClient` expects)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/v1/events?workflow=&status=&limit=&since=` | Bearer `tcn_...` | List workflow events |
+| `GET` | `/v1/traces/{trace_id}` | Bearer `tcn_...` | Full span tree for a trace |
+| `GET` | `/v1/workflows?limit=` | Bearer `tcn_...` | Aggregated workflow run summaries |
+| `GET` | `/v1/spans/{span_id}` | Bearer `tcn_...` | Single span detail |
 
 ---
 
@@ -20,371 +87,229 @@ A `@trace("workflow_name")` decorator that captures method execution flow (timin
 
 | # | Decision | Answer |
 |---|---|---|
-| Q1 | Endpoint design | **Dedicated `POST /v1/traces`** — traces are structurally different from metrics/events. Separate endpoint, clean contract, independent rate limits. |
-| Q2 | Auto-start or explicit init | **Explicit `teracron.up()`** — if user decorates without init, raise a clear error: *"call `teracron.up()` before using `@trace`"*. No silent swallowing. |
-| Q3 | Buffer strategy | **Separate buffer** for traces — isolated from metrics. Different data shapes, different flush destinations, independent failure domains. |
-| Q4 | Flush limits | **100 spans per batch, flush every 10 seconds** (whichever comes first). Both configurable via `teracron.up(trace_batch_size=100, trace_flush_interval=10)`. |
-| Q5 | Overflow policy | **Drop oldest + warn once.** Ring buffer. SDK never blocks or slows user's application. One warning log when drops begin, then silent. |
-| Q6 | Sampling strategy | **All-or-nothing per trace.** Decision made at trace root (first `@trace` call). All spans in a sampled trace are kept. Hash-based deterministic sampling on `trace_id`. |
-| Q7 | PII scrubber | **User-provided callable.** Applied to `metadata` and `captured_params` dicts before buffering. Default: passthrough (`None`). Scrubber receives a shallow copy — can mutate or return replacement dict. Exception in scrubber → data dropped (never leaked). |
-| Q8 | Middleware scope | **Auto-instrumentation only for request/response lifecycle.** Middleware creates a root span per request and propagates trace context. Business-logic tracing still requires explicit `@trace`. |
+| Q1 | Trace endpoint | **Dedicated `POST /v1/traces`** — separate from metrics, independent rate limits |
+| Q2 | Event endpoint | **Dedicated `POST /v1/events`** — separate from traces |
+| Q3 | Auth for ingest | **Encryption gate** — same as metrics. RSA envelope proves possession of project public key |
+| Q4 | Auth for queries | **Bearer `tcn_...` API key** — decode key → extract slug → verify project exists |
+| Q5 | Rate limits | **Separate buckets**: traces 30 req/min, events 30 req/min (independent from metrics 60 req/min) |
+| Q6 | Payload limits | **128KB for traces** (up to 100 spans), **64KB for events** |
+| Q7 | Convex table strategy | **`spans` + `workflowEvents`** — no denormalized workflow runs table (aggregate on read for now) |
+| Q8 | API route strategy | **Next.js API routes** as canonical endpoints (same as `/api/ingest`), Convex HTTP routes as fallback |
 
 ---
 
-## User-Facing API (Complete — Phase 1+2+3)
+## Completed Phases (SDK)
 
-```python
-import teracron
-from teracron.tracing import trace
+### Phase 1 — MVP (SDK `0.3.0`) ✅
+### Phase 2 — Depth (SDK `0.4.0`) ✅
+### Phase 3 — Ecosystem (SDK `0.5.0`) ✅
+### Phase 4 — Agent & Workflow Page (SDK `0.6.0`) ✅
 
-teracron.up(api_key="tcn_...")
-
-# Phase 1 — flat spans, auto-correlated within a thread/async context
-@trace("payment")
-def create_order(cart):
-    ...
-
-@trace("payment")
-async def charge_card(order_id, amount):
-    ...
-
-# Phase 2 — nested spans (auto-detected via context)
-@trace("payment")
-def process_payment(cart):
-    order = create_order(cart)          # child span
-    charge_card(order.id, order.total)  # child span
-
-# Phase 2 — context manager
-from teracron.tracing import trace_context
-
-with trace_context("payment", operation="validate") as span:
-    span.set_metadata({"order_id": "ORD-123"})
-
-# Phase 2 — opt-in parameter capture (PII safety boundary)
-@trace("payment", capture=["order_id", "amount"])
-def charge_card(order_id, amount, card_number):
-    # order_id + amount captured; card_number is NEVER sent
-    ...
-
-# Phase 2 — cross-process propagation
-from teracron.tracing import get_trace_header, set_trace_header
-headers["X-Teracron-Trace"] = get_trace_header()
-set_trace_header(request.headers.get("X-Teracron-Trace"))
-
-# Phase 3 — sampling (1.0 = capture all, 0.1 = 10% of traces)
-teracron.up(trace_sample_rate=0.5)
-
-# Phase 3 — PII scrubber hook
-def my_scrubber(data: dict) -> dict:
-    data.pop("email", None)
-    data.pop("ssn", None)
-    return data
-
-teracron.up(tracing_scrubber=my_scrubber)
-
-# Phase 3 — FastAPI auto-instrumentation
-from teracron.tracing.middleware.fastapi import TeracronTracingMiddleware
-app.add_middleware(TeracronTracingMiddleware, workflow="api")
-
-# Phase 3 — Django auto-instrumentation
-# settings.py
-MIDDLEWARE = [
-    "teracron.tracing.middleware.django.TeracronTracingMiddleware",
-    ...
-]
-
-# Phase 3 — Celery auto-instrumentation
-from teracron.tracing.middleware.celery import setup_celery_tracing
-setup_celery_tracing(app, workflow="tasks")
-```
+**SDK test suite: 479 passed, 0 failed, 0 errors.**
 
 ---
 
-## Data Model
+## Phase 5 — Backend Schema & Data Layer 🔲
 
-### Span (single method execution)
+> **Target:** `convex/schema.ts`, `convex/traces.ts`, `convex/events.ts`, `convex/workflows.ts`  
+> **Depends on:** Nothing (first backend phase)
 
-| Field | Type | Source | Description |
-|---|---|---|---|
-| `trace_id` | `str` | Auto-generated per root span | Groups all spans in one workflow execution |
-| `span_id` | `str` | Auto-generated per span | Unique identifier for this method call |
-| `parent_span_id` | `str \| null` | Auto from context | Enables call-tree reconstruction |
-| `workflow` | `str` | User-provided in `@trace("name")` | Logical process name |
-| `operation` | `str` | Auto from `func.__qualname__` | Method/function name |
-| `status` | `enum` | Auto | `started` · `succeeded` · `failed` |
-| `started_at` | `int` | Auto (Unix ms) | Wall-clock start time |
-| `duration_ms` | `float` | Auto (`time.monotonic()` delta) | Execution wall-clock time |
-| `error_type` | `str \| null` | Auto from exception | `ValueError`, `TimeoutError`, etc. |
-| `error_message` | `str \| null` | Auto from exception | Exception message (max 1024 chars) |
-| `metadata` | `dict \| null` | User-provided | Custom KV pairs (max 32 keys, primitives only) |
-| `captured_params` | `dict \| null` | Opt-in via `capture=[...]` | Whitelisted parameter values (max 512 char per value) |
-
----
-
-## Architecture
-
-```
-teracron/
-├── __init__.py              # re-export: all public APIs  v0.6.0
-├── client.py                # trace buffer + trace flush path + sampling + scrubber
-├── config.py                # tracing config fields + sampling + scrubber + auth constants
-├── types.py                 # Span, WorkflowEvent, WorkflowRun, SimulationResult, AuthToken
-├── transport.py             # /v1/traces + /v1/events endpoint support
-├── auth.py                  # CLI auth: login/logout/whoami, credential storage (Phase 4)
-├── query.py                 # Read-only query client: events, traces, workflows (Phase 4)
-├── simulate.py              # Failure simulation engine: replay, diagnosis, repro (Phase 4)
-├── .agent-skill.md          # Root agent skill reference (Phase 4)
-├── tracing/
-│   ├── __init__.py          # public API exports
-│   ├── .agent-skill.md      # Full agent skill reference (Phase 4)
-│   ├── decorator.py         # @trace — sync + async, span lifecycle, event emission
-│   ├── context.py           # contextvars: trace_id + span stack + propagation
-│   ├── span.py              # Span builder, sanitisation
-│   ├── sampling.py          # Deterministic hash-based sampling + ContextVar
-│   ├── events.py            # Structured workflow event emitter + EventBuffer (Phase 4)
-│   └── middleware/
-│       ├── __init__.py
-│       ├── fastapi.py       # FastAPI/Starlette ASGI middleware
-│       ├── django.py        # Django WSGI middleware
-│       └── celery.py        # Celery signal hooks (4 signals)
-├── collector.py             # psutil memory/CPU metrics
-├── crypto.py                # RSA-4096 + AES-256-GCM encryption
-├── encoder.py               # zero-dependency protobuf encoder
-├── apikey.py                # tcn_ API key encode/decode
-└── cli.py                   # teracron-agent CLI (9 subcommands, Phase 4)
-```
-
----
-
-## Security Architecture (5-Layer Defence)
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ Layer 1: Sampling     │ trace_sample_rate=0.5 → 50% of traces      │
-│                       │ skip the entire pipeline. Zero allocation.  │
-├───────────────────────┼─────────────────────────────────────────────┤
-│ Layer 2: Capture      │ capture=["order_id"] → ONLY order_id        │
-│   whitelist           │ extracted. card_number, cvv: NEVER.         │
-│                       │ Default: NO params captured.                │
-├───────────────────────┼─────────────────────────────────────────────┤
-│ Layer 3: Scrubber     │ tracing_scrubber=my_fn → user callable      │
-│                       │ mutates metadata/params before buffering.   │
-│                       │ Exception → data DROPPED (never leaked).    │
-├───────────────────────┼─────────────────────────────────────────────┤
-│ Layer 4: Sanitise     │ _sanitise_captured_params() → type-check,   │
-│                       │ truncate strings (512 chars), repr() objs.  │
-│                       │ _sanitise_metadata() → max 32 keys,         │
-│                       │ 128-char keys, 1024-char values.            │
-├───────────────────────┼─────────────────────────────────────────────┤
-│ Layer 5: Transport    │ RSA-4096 + AES-256-GCM encryption.          │
-│                       │ TLS 1.2+ only. Domain allowlist.            │
-└───────────────────────┴─────────────────────────────────────────────┘
-```
-
----
-
-## Phase Breakdown
-
-### Phase 1 — MVP (SDK `0.3.0`) ✅ COMPLETED — 2025-07-20
-
-**Delivered:**
-- `@trace("workflow")` decorator (sync + async)
-- Flat spans (no nesting, no parent-child)
-- `Span` frozen dataclass with `trace_id`, `span_id`, `workflow`, `operation`, `status`, `started_at`, `duration_ms`, `error_type`, `error_message`
-- Separate trace buffer with ring-buffer overflow (drop oldest + warn once)
-- Flush to dedicated `POST /v1/traces` endpoint
-- Config: `tracing_enabled`, `trace_batch_size` (1–10K), `trace_flush_interval` (1–300s)
-- Env vars: `TERACRON_TRACING_ENABLED`, `TERACRON_TRACE_BATCH_SIZE`, `TERACRON_TRACE_FLUSH_INTERVAL`
-- `teracron.tracing` subpackage: `context.py`, `span.py`, `decorator.py`
-- 5 new test modules, all passing
-
-**Test count after Phase 1:** 152 tests
-
-### Phase 2 — Depth (SDK `0.4.0`) ✅ COMPLETED — 2025-07-20
-
-**Delivered:**
-- Nested spans / parent-child via `ContextVar`-based span stack (`push_span`, `pop_span`, `peek_parent_span_id`)
-- `trace_context` sync + `async_trace_context` async context managers yielding `SpanHandle`
-- `SpanHandle.set_metadata()` with type validation + size limits (32 keys, 128-char keys, 1024-char values)
-- Opt-in parameter capture: `@trace("wf", capture=["param1"])` — only whitelisted params extracted via `inspect.signature` binding. Default: NO params captured.
-- Sanitisation: `_sanitise_captured_params()` — type-check, truncate strings to 512 chars, `repr()` complex types
-- Cross-process propagation: `get_trace_header()` / `set_trace_header()` with `X-Teracron-Trace` header (format: `<trace_id>:<parent_span_id>`, hex-validated)
-- Error message truncation to 1024 chars
-- 3 new test modules (76 new tests)
-
-**Test count after Phase 2:** 258 tests
-
-### Phase 3 — Ecosystem (SDK `0.5.0`) ✅ COMPLETED — 2025-07-21
-
-**Delivered:**
-- **Deterministic sampling** — `teracron/tracing/sampling.py`: `should_sample(trace_id, rate)` using MD5 hash → uint64 → threshold comparison. O(1), zero allocations, no RNG. Decision at trace root via `ContextVar`, inherited by all children (all-or-nothing per trace).
-- **Sampling config** — `trace_sample_rate: float` (0.0–1.0, default 1.0). Env var: `TERACRON_TRACE_SAMPLE_RATE`. Clamped at resolution. Non-sampled spans never buffered (param extraction also skipped).
-- **PII scrubber hook** — `tracing_scrubber: Callable[[dict], dict]`. Applied to `metadata` and `captured_params` via `_apply_scrubber()` in `_end_span` before buffering. Receives shallow copy. Exception → data dropped (PII never leaked). Validated as callable at config time.
-- **FastAPI ASGI middleware** — `teracron.tracing.middleware.fastapi.TeracronTracingMiddleware`. Auto root span per request. Records `http.method`, `http.path`, `http.status_code` metadata. Extracts inbound `X-Teracron-Trace` header, injects in response. Respects sampling + scrubber.
-- **Django WSGI middleware** — `teracron.tracing.middleware.django.TeracronTracingMiddleware`. Same semantics. Workflow configurable via `TERACRON_WORKFLOW` Django setting. Reads `HTTP_X_TERACRON_TRACE` from `request.META`.
-- **Celery signal hooks** — `setup_celery_tracing(app, workflow="celery")`. 4 signals: `before_task_publish` (inject header), `task_prerun` (restore context + create span), `task_failure` (record error), `task_postrun` (finalise span). Records `celery.task_id`, `celery.state` metadata. Task-local span state keyed by `task_id`.
-- **7 new test modules** (93 new tests): `test_sampling.py`, `test_scrubber.py`, `test_sampling_integration.py`, `test_middleware_fastapi.py`, `test_middleware_django.py`, `test_middleware_celery.py`, `test_phase3_config.py`
-
-**Test count after Phase 3:** 351 tests (0 failures, 0 regressions)
-
----
-
-## Task Breakdown — All Phases
-
-### Phase 1 Tasks (S1–S15) ✅
-
-| # | Task | Status |
-|---|---|---|
-| S1 | `Span` frozen dataclass + `to_dict()` | ✅ |
-| S2 | `context.py` — `ContextVar` trace ID propagation | ✅ |
-| S3 | `span.py` — `create_span()` factory | ✅ |
-| S4 | `decorator.py` — `@trace` sync + async | ✅ |
-| S5 | Trace buffer (ring buffer, `collections.deque`) | ✅ |
-| S6 | Trace flush loop (batch size + interval) | ✅ |
-| S7 | Config fields: `tracing_enabled`, `trace_batch_size`, `trace_flush_interval` | ✅ |
-| S8 | Transport: `POST /v1/traces` | ✅ |
-| S9 | Overflow policy: drop oldest + warn once | ✅ |
-| S10 | Explicit init guard (`RuntimeError` if no `teracron.up()`) | ✅ |
-| S11–S15 | Tests + docs + changelog | ✅ |
-
-### Phase 2 Tasks (S16–S20) ✅
-
-| # | Task | Status |
-|---|---|---|
-| S16 | Span stack (`push_span`, `pop_span`, `peek_parent_span_id`) | ✅ |
-| S17 | `trace_context` + `async_trace_context` context managers | ✅ |
-| S18 | Metadata support (`SpanHandle.set_metadata()`, sanitisation) | ✅ |
-| S19 | Cross-process propagation (`get_trace_header`, `set_trace_header`) | ✅ |
-| S20 | Opt-in parameter capture (`capture=[...]`) + PII safety boundary | ✅ |
-
-### Phase 3 Tasks (S21–S35) ✅
+### Tasks
 
 | # | Task | Status | Detail |
 |---|---|---|---|
-| S21 | Sampling module | ✅ | `tracing/sampling.py` — MD5 hash → uint64, `ContextVar` decision propagation |
-| S22 | Sampling config | ✅ | `trace_sample_rate` in `ResolvedConfig`, env var, clamped [0.0, 1.0] |
-| S23 | Sampling integration | ✅ | `_begin_span` returns `sampled` flag, `_end_span` skips non-sampled |
-| S24 | PII scrubber hook | ✅ | `_apply_scrubber()` — shallow copy, exception → drop data |
-| S25 | PII scrubber config | ✅ | `tracing_scrubber` in `ResolvedConfig`, callable validation at config time |
-| S26 | FastAPI middleware | ✅ | ASGI wrapper, header extract/inject, method/path/status metadata |
-| S27 | Django middleware | ✅ | WSGI class, `TERACRON_WORKFLOW` setting, `HTTP_X_TERACRON_TRACE` |
-| S28 | Celery signal hooks | ✅ | 4 signals, header propagation, task-local span state |
-| S29 | Tests — sampling | ✅ | Deterministic, boundary values, distribution ±5% over 10K |
-| S30 | Tests — scrubber | ✅ | Applied, exception caught, passthrough, mutation, new dict |
-| S31 | Tests — FastAPI | ✅ | Auto-span, header extraction, status metadata, error recording |
-| S32 | Tests — Django | ✅ | Same for Django |
-| S33 | Tests — Celery | ✅ | Header propagation, task spans, error recording |
-| S34 | README update | ✅ | Sampling, scrubber, middleware sections |
-| S35 | CHANGELOG `0.5.0` | ✅ | Full Phase 3 changelog |
+| B1 | `spans` table definition in `schema.ts` | 🔲 | Fields: `projectId`, `traceId`, `spanId`, `parentSpanId`, `workflow`, `operation`, `status`, `startedAt`, `durationMs`, `errorType`, `errorMessage`, `metadata`, `capturedParams`, `receivedAt`. Indexes: `by_project_traceId`, `by_traceId`, `by_spanId`, `by_project_workflow_startedAt`, `by_project_startedAt` |
+| B2 | `workflowEvents` table definition in `schema.ts` | 🔲 | Fields: `projectId`, `traceId`, `spanId`, `workflow`, `eventType`, `operation`, `severity`, `timestamp`, `errorType`, `errorMessage`, `metadata`, `receivedAt`. Indexes: `by_project_timestamp`, `by_project_workflow`, `by_traceId` |
+| B3 | `traceIngestRateLimits` table definition in `schema.ts` | 🔲 | Separate rate limit table from metrics. Fields: `slug`, `windowStart`, `count`. Index: `by_slug_window` |
+| B4 | `convex/traces.ts` — `processTraceIngest` mutation | 🔲 | Rate limit (30/min per slug) → lookup project → decrypt envelope → parse JSON → validate each span (`trace_id` hex ≤64 chars, `span_id` hex ≤64 chars, `workflow` non-empty, `status` in allowed set, `startedAt` within bounds, `durationMs` ≥0, `error_message` ≤1024 chars, `metadata` ≤32 keys) → batch insert into `spans`. Max 100 spans per batch |
+| B5 | `convex/traces.ts` — `getTraceSpans` query | 🔲 | Authenticated. Fetch all spans for a `traceId` belonging to project, ordered by `startedAt` |
+| B6 | `convex/traces.ts` — `getSpanById` query | 🔲 | Authenticated. Single span lookup by `spanId` |
+| B7 | `convex/traces.ts` — `listRecentTraces` query | 🔲 | Authenticated. Distinct recent traces for a project (last N unique `traceId`s by most recent `startedAt`). Returns trace summary: `traceId`, `workflow`, `status`, `spanCount`, `durationMs`, `startedAt` |
+| B8 | `convex/events.ts` — `processEventIngest` mutation | 🔲 | Rate limit → decrypt → parse JSON → validate (`event_type` in allowed set, `severity` valid, timestamps within bounds) → insert into `workflowEvents` |
+| B9 | `convex/events.ts` — `listEvents` query | 🔲 | Authenticated. Filter by `workflow`, `eventType`, `since` timestamp. Paginated with `limit` (max 1000) |
+| B10 | `convex/workflows.ts` — `listWorkflows` query | 🔲 | Authenticated. Aggregate spans by `workflow` for the project — distinct `traceId` count, failed count, avg duration, last run time |
+
+### Validation Rules (B4, B8)
+
+```
+Span validation:
+  - trace_id:        hex string, 1–64 chars
+  - span_id:         hex string, 1–64 chars
+  - workflow:        non-empty string, ≤128 chars
+  - operation:       non-empty string, ≤256 chars
+  - status:          "started" | "succeeded" | "failed"
+  - started_at:      Unix ms, not >30s future, not >10min past
+  - duration_ms:     ≥0, ≤86_400_000 (24h ceiling)
+  - error_message:   ≤1024 chars
+  - metadata:        ≤32 keys, string keys ≤128 chars, primitive values ≤1024 chars
+  - captured_params: ≤32 keys, string keys ≤128 chars, primitive values ≤512 chars
+
+Event validation:
+  - event_type:      one of VALID_EVENT_TYPES (7 values)
+  - severity:        "info" | "warning" | "error" | "critical"
+  - workflow:        non-empty string, ≤128 chars
+  - operation:       ≤256 chars
+  - error_message:   ≤512 chars
+  - metadata:        ≤16 keys, primitives only
+  - timestamp:       Unix ms, not >30s future, not >10min past
+```
 
 ---
 
-## Success Criteria — Final Verification
+## Phase 6 — Ingest API Routes 🔲
 
-### Phase 1 ✅ Verified
+> **Target:** Next.js API routes + Convex HTTP fallback  
+> **Depends on:** Phase 5
 
-- Flat spans, buffer, flush, config — all working.
-- 152 tests passing.
-
-### Phase 2 ✅ Verified
-
-- Nested spans, context managers, metadata, parameter capture, cross-process propagation.
-- PII boundary enforced (default: NO params captured).
-- 258 tests passing (zero regression on Phase 1).
-
-### Phase 3 ✅ Verified — 2025-07-21
-
-| # | Criterion | Result |
-|---|---|---|
-| 1 | `trace_sample_rate=0.5` samples ~50% (±5% over 10K) | ✅ Verified in `test_sampling.py::test_distribution_roughly_uniform` |
-| 2 | `tracing_scrubber` applied to metadata + captured_params; exceptions never crash | ✅ Verified in `test_scrubber.py` (15 tests) |
-| 3 | FastAPI middleware auto-creates root span with method/path/status_code | ✅ Verified in `test_middleware_fastapi.py` (10 tests) |
-| 4 | Django middleware does the same | ✅ Verified in `test_middleware_django.py` (8 tests) |
-| 5 | Celery hooks propagate trace context + auto-create task spans | ✅ Verified in `test_middleware_celery.py` (6 tests) |
-| 6 | All middleware extracts/injects `X-Teracron-Trace` headers | ✅ Verified in middleware tests |
-| 7 | Zero regression on existing tests | ✅ 258 pre-existing tests still pass |
-| 8 | All new Phase 3 tests pass | ✅ 93 new tests pass |
-
-**Final test suite: 351 passed, 0 failed, 0 errors.**
-
----
-
-## What Gets Hardened Later (Post-0.5.0)
-
-**Performance & Memory:**
-- `__slots__` on `Span` dataclass for memory optimization
-- Decorator overhead benchmarking (target: < 10µs)
-- `copy_context()` integration for `ThreadPoolExecutor` propagation
-- Pre-allocated span pools for high-throughput services
-
-**Features:**
-- gRPC interceptor middleware
-- ASGI lifespan event tracing
-- Conditional span finalization (early abort)
-- Span events (sub-span log entries)
-- Trace-based alerting SDK hooks
-
-**Quality:**
-- Import-time side-effect audit
-- Fuzz testing on header parsing + config resolution
-- Integration tests against live Teracron backend
-- Python 3.12+ `TaskGroup` trace propagation testing
-
----
-
-### Phase 4 — Agent & Workflow Page (SDK `0.6.0`) ✅ COMPLETED — 2026-04-27
-
-**Delivered:**
-- **CLI authentication** — `teracron-agent login/logout/whoami` with credential storage at `~/.teracron/credentials.json` (mode 0600). API key resolution chain: CLI flag → env var → stored credentials. Secure wipe on logout (overwrite with zeros before unlink).
-- **CLI subcommand architecture** — `argparse`-based router with 9 subcommands: `run`, `login`, `logout`, `whoami`, `events`, `workflows`, `trace`, `simulate`, `curl-example`. Backward-compatible: no subcommand = `run`.
-- **Read-only query client** — `TeracronQueryClient` with `list_events()`, `get_trace()`, `list_workflows()`, `get_span()`. Bearer token auth. Graceful HTTP error handling (401, 404, 429). SDK ready for backend endpoints not yet deployed.
-- **Failure simulation engine** — `FailureSimulator` with `fetch_failure_context()`, `generate_repro_script()`, `print_diagnosis()`. Never executes code — generates inert artifacts for AI agent consumption.
-- **Structured workflow events** — `teracron/tracing/events.py` with `build_event()`, convenience builders, `EventBuffer`. Auto-emission from `@trace` when `trace_emit_events=True`. Event types: workflow_started/completed/failed, step_started/completed/failed, retry.
-- **Agent skill files** — Complete AI agent reference at `teracron/tracing/.agent-skill.md` and `teracron/.agent-skill.md` with curl examples, JSON schemas, decision tree, error handling guide.
-- **Transport GET support** — `send_events()` and `query_base_url` property on `Transport`.
-- **New types** — `WorkflowEvent`, `WorkflowRun`, `SimulationResult`, `AuthToken` dataclasses.
-- **`--json` output** — All CLI commands support machine-readable JSON output.
-- **Config additions** — `trace_emit_events` flag (env: `TERACRON_TRACE_EMIT_EVENTS`).
-- **5 new test modules** (128 new tests): `test_auth.py`, `test_query.py`, `test_simulate.py`, `test_cli_commands.py`, `test_events.py`
-
-**Test count after Phase 4:** 479 tests (0 failures, 0 regressions)
-
-### Phase 4 Tasks (S36–S50) ✅
+### Tasks
 
 | # | Task | Status | Detail |
 |---|---|---|---|
-| S36 | `auth.py` — credential storage + login/logout/whoami | ✅ | `~/.teracron/credentials.json`, mode 0600, secure wipe, key masking |
-| S37 | CLI subcommand rewrite | ✅ | argparse router, 9 subcommands, backward compat (no subcmd = run) |
-| S38 | Config — auth constants + `trace_emit_events` | ✅ | `API_BASE_PATH`, `CREDENTIALS_DIR`, `resolve_api_base_url()` |
-| S39 | `query.py` — read-only query client | ✅ | `TeracronQueryClient`, Bearer auth, 404/401/429 handling |
-| S40 | Transport GET support | ✅ | `send_events()`, `query_base_url` property |
-| S41 | New types | ✅ | `WorkflowEvent`, `WorkflowRun`, `SimulationResult`, `AuthToken` |
-| S42 | `tracing/events.py` — structured events | ✅ | `build_event()`, convenience builders, `EventBuffer` ring buffer |
-| S43 | `@trace` auto-emit events | ✅ | `_emit_start_event()`, `_emit_end_event()` when `trace_emit_events=True` |
-| S44 | `simulate.py` — failure replay | ✅ | `FailureSimulator`, context extraction, repro script, markdown diagnosis |
-| S45 | Agent skill file — full rewrite | ✅ | curl examples, JSON schemas, decision tree, error handling |
-| S46 | Root agent skill file | ✅ | Quick reference at `teracron/.agent-skill.md` |
-| S47 | Tests — auth | ✅ | 27 tests: storage, permissions, login, logout, masking, priority chain |
-| S48 | Tests — query | ✅ | 27 tests: construction, headers, responses, input validation |
-| S49 | Tests — simulate | ✅ | 14 tests: context extraction, repro script, diagnosis, errors |
-| S50 | Tests — CLI + events | ✅ | 60 tests: parser, subcommands, JSON output, event building, buffer |
+| B11 | `src/app/api/v1/traces/route.ts` — `POST /v1/traces` | 🔲 | Validate `X-Project-Slug` header → validate `Content-Type: application/octet-stream` → enforce 128KB max payload → forward to `processTraceIngest` Convex mutation → return `202 { accepted, dropped }`. Error mapping: `RATE_LIMITED` → 429, `PROJECT_NOT_FOUND` → 404, `DECRYPTION_FAILED` → 401, etc. |
+| B12 | `src/app/api/v1/events/route.ts` — `POST /v1/events` | 🔲 | Same pattern as B11 but for events. 64KB max payload. Forward to `processEventIngest` mutation |
+| B13 | `convex/http.ts` — Add `/v1/traces` POST route | 🔲 | Fallback ingest via Convex HTTP router (same pattern as existing `/ingest`). 128KB limit. CORS headers |
+| B14 | `convex/http.ts` — Add `/v1/events` POST route | 🔲 | Fallback ingest via Convex HTTP router. 64KB limit. CORS headers |
+| B15 | `convex/http.ts` — CORS preflight for new routes | 🔲 | OPTIONS handlers for `/v1/traces` and `/v1/events` |
 
-### Phase 4 Success Criteria ✅ Verified — 2026-04-27
+### Endpoint Contract
 
-| # | Criterion | Result |
-|---|---|---|
-| 1 | `teracron-agent login` stores credentials at `~/.teracron/credentials.json` with 0600 | ✅ Verified in `test_auth.py` |
-| 2 | `teracron-agent whoami` shows auth status (file + env var source) | ✅ Verified in `test_cli_commands.py` |
-| 3 | `teracron-agent events --status=failed --json` returns structured JSON | ✅ Verified in `test_query.py` + `test_cli_commands.py` |
-| 4 | `teracron-agent trace <id>` fetches full span tree | ✅ Verified in `test_query.py` |
-| 5 | `teracron-agent simulate <id> --format=markdown` produces diagnosis | ✅ Verified in `test_simulate.py` |
-| 6 | `teracron-agent simulate <id> --format=script` generates Python repro script | ✅ Verified in `test_simulate.py` |
-| 7 | curl examples include Bearer auth header | ✅ Verified in `test_cli_commands.py::TestCurlExampleCommand` |
-| 8 | API key never printed in full (masked in all output) | ✅ Verified in `test_auth.py::TestMaskApiKey` |
-| 9 | Expired credentials return `None` | ✅ Verified in `test_auth.py::TestCredentialStorage::test_expired_credentials` |
-| 10 | Backend 404 returns graceful error + hint | ✅ Verified in `test_query.py::TestErrorResponses::test_404_not_deployed` |
-| 11 | Zero regression on existing 351 tests | ✅ All 351 pass |
-| 12 | All 128 new Phase 4 tests pass | ✅ 128 passed |
+```
+POST /v1/traces
+  Request:   X-Project-Slug: <slug>, Content-Type: application/octet-stream, body: encrypted envelope
+  Success:   202 { "status": "accepted", "accepted": 5, "dropped": 0 }
+  Errors:    400 (bad request), 401 (decryption failed), 404 (project not found),
+             413 (payload too large), 415 (wrong content type), 429 (rate limited)
 
-**Final test suite: 479 passed, 0 failed, 0 errors.**
+POST /v1/events
+  Request:   X-Project-Slug: <slug>, Content-Type: application/octet-stream, body: encrypted envelope
+  Success:   202 { "status": "accepted", "accepted": 3, "dropped": 0 }
+  Errors:    (same as above)
+```
+
+---
+
+## Phase 7 — Query API Routes 🔲
+
+> **Target:** Next.js API routes for SDK `TeracronQueryClient` + CLI  
+> **Depends on:** Phase 5
+
+### Tasks
+
+| # | Task | Status | Detail |
+|---|---|---|---|
+| B16 | `convex/lib/apiKeyAuth.ts` — API key authentication helper | 🔲 | Decode `tcn_...` Bearer token → extract `slug` → lookup project by slug → verify exists → return `projectId`. Reuse `decodeApiKey()` from SDK's apikey format. Reject invalid/expired keys |
+| B17 | `src/app/api/v1/traces/[traceId]/route.ts` — `GET /v1/traces/:id` | 🔲 | Authenticate via Bearer token → validate `traceId` (hex, ≤64 chars) → call `getTraceSpans` → return `{ trace_id, spans: [...] }` |
+| B18 | `src/app/api/v1/spans/[spanId]/route.ts` — `GET /v1/spans/:id` | 🔲 | Authenticate → validate `spanId` → call `getSpanById` → return span object |
+| B19 | `src/app/api/v1/events/route.ts` — `GET /v1/events` (extend B12) | 🔲 | Authenticate → parse query params (`workflow`, `status`, `limit`, `since`) → call `listEvents` → return `{ events: [...] }` |
+| B20 | `src/app/api/v1/workflows/route.ts` — `GET /v1/workflows` | 🔲 | Authenticate → parse `limit` param → call `listWorkflows` → return `{ workflows: [...] }` |
+
+### Authentication Flow
+
+```
+Authorization: Bearer tcn_<base64_payload>
+  ↓
+Decode API key → extract project_slug
+  ↓
+Lookup project by slug → 404 if not found
+  ↓
+Return projectId → proceed with query
+```
+
+### Response Contracts
+
+```
+GET /v1/traces/{trace_id}
+  200 { "trace_id": "abc...", "workflow": "payment", "span_count": 5, "spans": [...] }
+  401 { "error": "Authentication failed" }
+  404 { "error": "Trace not found" }
+
+GET /v1/spans/{span_id}
+  200 { "span_id": "abc...", "trace_id": "...", "workflow": "...", ... }
+
+GET /v1/events?workflow=payment&status=failed&limit=50&since=2025-07-22T00:00:00Z
+  200 { "events": [...], "count": 12 }
+
+GET /v1/workflows?limit=20
+  200 { "workflows": [{ "workflow": "payment", "total_runs": 150, "failed_runs": 3, "avg_duration_ms": 245.2, "last_run_at": ... }] }
+```
+
+---
+
+## Phase 8 — Dashboard UI 🔲
+
+> **Target:** Traces panel in project dashboard  
+> **Depends on:** Phase 5 (Convex queries)
+
+### Tasks
+
+| # | Task | Status | Detail |
+|---|---|---|---|
+| B21 | Update `ProjectSidebar.tsx` — add "Traces" nav item | 🔲 | Extend `ProjectSection` type to `"metrics" \| "settings" \| "traces"`. Add nav entry |
+| B22 | Update `project/[id]/page.tsx` — route to `TracesPanel` | 🔲 | Extend section type. Subscribe to `api.traces.listRecentTraces`. Render `<TracesPanel>` when `activeSection === "traces"` |
+| B23 | `src/components/TracesPanel.tsx` — trace list view | 🔲 | Table: Workflow, Status (badge), Duration, Span Count, Timestamp. Filters: workflow dropdown, status, time range. Click row → expand `TraceTimeline`. Empty state: "No traces received yet" |
+| B24 | `src/components/TraceTimeline.tsx` — span waterfall | 🔲 | Horizontal waterfall chart. Bar width ∝ `duration_ms`. Indented child spans. Hover tooltip: operation, duration, metadata. Click → `TraceDetail` |
+| B25 | `src/components/TraceDetail.tsx` — span detail panel | 🔲 | Full span info: operation, workflow, status, duration, error (if failed), metadata KV pairs, captured params, parent span link |
+| B26 | Update `globals.css` — trace status colours | 🔲 | Warm muted palette: succeeded `#6b8a5e`, failed `#c4624a`, in-progress `#b89b5e`. No bright/neon colours |
+
+### UI Colour Palette (Warm Dark Mode)
+
+```
+Status badges:
+  succeeded:    bg #6b8a5e/15, text #6b8a5e   (muted warm green)
+  failed:       bg #c4624a/15, text #c4624a   (muted burnt red)
+  in_progress:  bg #b89b5e/15, text #b89b5e   (warm gold)
+
+Waterfall bars:
+  succeeded:    #8a7e6b  (warm taupe)
+  failed:       #c4624a  (burnt orange)
+  root span:    #a08b6e  (warm bronze)
+
+Backgrounds:
+  panel:        existing dash-surface
+  row hover:    existing dash-bg
+  selected:     accent/10
+```
+
+---
+
+## Implementation Order
+
+```
+Phase 5 (Schema + Data)  ──┐
+                            ├──→  Phase 6 (Ingest Routes)  ──→  End-to-end SDK → Backend
+                            ├──→  Phase 7 (Query Routes)   ──→  CLI + SDK queries work
+Phase 5 ────────────────────┴──→  Phase 8 (Dashboard UI)   ──→  Visual tracing
+```
+
+Phase 6 and Phase 7 are independent of each other (both depend only on Phase 5).  
+Phase 8 depends only on Phase 5 (uses Convex reactive queries directly, not REST routes).
+
+---
+
+## Files Changed / Created (Backend)
+
+### Modified
+| File | Change |
+|---|---|
+| `convex/schema.ts` | Add `spans`, `workflowEvents`, `traceIngestRateLimits` tables |
+| `convex/http.ts` | Add `/v1/traces` POST, `/v1/events` POST, CORS preflight |
+| `src/components/ProjectSidebar.tsx` | Add "Traces" nav item, extend section type |
+| `src/app/dashboard/project/[id]/page.tsx` | Add traces section routing + `TracesPanel` render |
+| `src/app/globals.css` | Add trace status colour CSS variables |
+
+### Created
+| File | Purpose |
+|---|---|
+| `convex/traces.ts` | Trace ingest mutation + query functions |
+| `convex/events.ts` | Event ingest mutation + query functions |
+| `convex/workflows.ts` | Aggregated workflow queries |
+| `convex/lib/apiKeyAuth.ts` | Bearer token authentication for query endpoints |
+| `src/app/api/v1/traces/route.ts` | `POST /v1/traces` ingest |
+| `src/app/api/v1/traces/[traceId]/route.ts` | `GET /v1/traces/:id` query |
+| `src/app/api/v1/events/route.ts` | `POST /v1/events` ingest + `GET /v1/events` query |
+| `src/app/api/v1/workflows/route.ts` | `GET /v1/workflows` query |
+| `src/app/api/v1/spans/[spanId]/route.ts` | `GET /v1/spans/:id` query |
+| `src/components/TracesPanel.tsx` | Trace list view |
+| `src/components/TraceTimeline.tsx` | Span waterfall visualisation |
+| `src/components/TraceDetail.tsx` | Span detail panel |
 

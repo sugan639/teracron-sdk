@@ -85,7 +85,7 @@ class TeracronQueryClient:
         safe_domain = _sanitise_domain(domain)
         _validate_domain(safe_domain)
 
-        self._base_url = f"https://{safe_domain}/v1"
+        self._base_url = f"https://{safe_domain}/api/v1"
         self._timeout = max(2.0, min(timeout_s, 30.0))
 
         self._session = requests.Session()
@@ -182,7 +182,7 @@ class TeracronQueryClient:
         """
         Query recent workflow events.
 
-        ``GET /v1/events?workflow=X&status=failed&limit=50&since=...``
+        ``GET /api/v1/events?workflow=X&status=failed&limit=50&since=...``
 
         Args:
             workflow: Filter by workflow name.
@@ -208,7 +208,7 @@ class TeracronQueryClient:
         """
         Fetch a full trace span tree.
 
-        ``GET /v1/traces/{trace_id}``
+        ``GET /api/v1/traces/{trace_id}``
 
         Args:
             trace_id: The 32-char hex trace ID.
@@ -228,7 +228,7 @@ class TeracronQueryClient:
         """
         List workflow run summaries.
 
-        ``GET /v1/workflows?limit=20``
+        ``GET /api/v1/workflows?limit=20``
 
         Args:
             limit: Max workflows to return (clamped to 1–1000).
@@ -243,7 +243,7 @@ class TeracronQueryClient:
         """
         Fetch a single span detail.
 
-        ``GET /v1/spans/{span_id}``
+        ``GET /api/v1/spans/{span_id}``
 
         Args:
             span_id: The 32-char hex span ID.

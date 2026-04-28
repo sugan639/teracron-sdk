@@ -41,13 +41,13 @@ def _mock_response(status_code: int, json_data=None, headers=None):
 class TestClientConstruction:
     def test_valid_construction(self) -> None:
         client = TeracronQueryClient(api_key=_TEST_API_KEY)
-        assert client._base_url == "https://www.teracron.com/v1"
+        assert client._base_url == "https://www.teracron.com/api/v1"
 
     def test_custom_domain(self) -> None:
         client = TeracronQueryClient(
             api_key=_TEST_API_KEY, domain="api.teracron.com"
         )
-        assert client._base_url == "https://api.teracron.com/v1"
+        assert client._base_url == "https://api.teracron.com/api/v1"
 
     def test_empty_key_raises(self) -> None:
         with pytest.raises(ValueError, match="api_key is required"):
