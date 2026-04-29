@@ -82,6 +82,7 @@ from .tracing import (
 from .types import (
     AuthToken,
     FlushResult,
+    EventFlushResult,
     MetricsSnapshot,
     ResolvedConfig,
     SimulationResult,
@@ -117,6 +118,7 @@ __all__ = [
     "TeracronClient",
     # Types
     "AuthToken",
+    "EventFlushResult",
     "FlushResult",
     "MetricsSnapshot",
     "ResolvedConfig",

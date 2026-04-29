@@ -106,6 +106,15 @@ class TraceFlushResult:
     success: bool  # True when server returned 202
 
 
+@dataclass(frozen=True)
+class EventFlushResult:
+    """Result of a single event flush operation."""
+
+    sent: int  # event count sent in this flush
+    status_code: int  # HTTP status, or 0 on transport failure
+    success: bool  # True when server returned 202
+
+
 # ── Workflow Events (Phase 4 — query & agent support) ──
 
 

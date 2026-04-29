@@ -51,7 +51,7 @@ from .config import resolve_config
 from .crypto import encrypt_envelope
 from .encoder import encode_batch
 from .transport import Transport
-from .types import FlushResult, MetricsSnapshot, ResolvedConfig, TraceFlushResult
+from .types import EventFlushResult, FlushResult, MetricsSnapshot, ResolvedConfig, TraceFlushResult
 
 
 class TeracronClient:
@@ -89,6 +89,7 @@ class TeracronClient:
         "_scrubber",
         # Structured events (Phase 4)
         "_event_buffer",
+        "_last_event_flush_time",
     )
 
     def __init__(
@@ -148,6 +149,7 @@ class TeracronClient:
 
         # Structured events (Phase 4) — initialise only when event emission is enabled.
         self._event_buffer = None
+        self._last_event_flush_time = 0.0
         if self._config.trace_emit_events:
             from .tracing.events import EventBuffer
             self._event_buffer = EventBuffer(capacity=500)
@@ -179,6 +181,7 @@ class TeracronClient:
         self._started = True
         self._last_flush_time = time.monotonic()
         self._last_trace_flush_time = time.monotonic()
+        self._last_event_flush_time = time.monotonic()
 
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -215,9 +218,10 @@ class TeracronClient:
             self._thread.join(timeout=5.0)
             self._thread = None
 
-        # Final flushes — metrics then traces
+        # Final flushes — metrics, traces, then events
         self._flush()
         self._flush_traces()
+        self._flush_events()
 
         if self._transport is not None:
             self._transport.close()
@@ -294,6 +298,9 @@ class TeracronClient:
 
         # ── Trace flush check ──
         self._maybe_flush_traces()
+
+        # ── Event flush check ──
+        self._maybe_flush_events()
 
     def _flush(self) -> Optional[FlushResult]:
         """Drain buffer → encode → encrypt → send. Never raises."""
@@ -410,6 +417,66 @@ class TeracronClient:
         except Exception as exc:
             self._debug("Trace flush failed: %s" % exc)
             return TraceFlushResult(sent=0, status_code=0, success=False)
+
+    # ── Event Flush ──
+
+    def _maybe_flush_events(self) -> None:
+        """Check if an event flush is needed (buffer threshold or deadline)."""
+        if self._event_buffer is None:
+            return
+
+        buf_size = self._event_buffer.size
+        if buf_size == 0:
+            return
+
+        now = time.monotonic()
+        # Flush when buffer has ≥50 events or deadline exceeded (reuse trace interval).
+        batch_ready = buf_size >= 50
+        deadline_exceeded = (
+            (now - self._last_event_flush_time)
+            >= self._config.trace_flush_interval
+        )
+
+        if batch_ready or deadline_exceeded:
+            self._flush_events()
+
+    def _flush_events(self) -> Optional[EventFlushResult]:
+        """Drain event buffer → JSON encode → encrypt → send. Never raises."""
+        if self._event_buffer is None:
+            return None
+
+        batch = self._event_buffer.drain(max_items=200)
+        if not batch:
+            return None
+
+        self._last_event_flush_time = time.monotonic()
+
+        if self._transport is None:
+            return None
+
+        try:
+            payload = {
+                "type": "events",
+                "project_slug": self._config.project_slug,
+                "events": batch,
+            }
+            raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            envelope = encrypt_envelope(raw, self._config.public_key)
+            result = self._transport.send_events(envelope)
+
+            flush_result = EventFlushResult(
+                sent=len(batch),
+                status_code=result.status_code,
+                success=result.success,
+            )
+            self._debug(
+                "Event flush: sent=%d status=%d ok=%s"
+                % (flush_result.sent, flush_result.status_code, flush_result.success)
+            )
+            return flush_result
+        except Exception as exc:
+            self._debug("Event flush failed: %s" % exc)
+            return EventFlushResult(sent=0, status_code=0, success=False)
 
 
 # ── Module-level singleton API ──
