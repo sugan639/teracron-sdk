@@ -83,6 +83,16 @@ def charge_card(order_id, amount, card_number):
 
 This is the **PII safety boundary** — sensitive data like passwords, tokens, and card numbers are never sent unless you explicitly list them in `capture=[...]`.
 
+To additionally record that non-captured arguments *existed* (as the marker
+`"#redacted"`, never their value), opt in with `redact_uncaptured=True`:
+
+```python
+@trace("payment", capture=["amount"], redact_uncaptured=True)
+def charge_card(amount, card_number):
+    ...
+# captured_params → {"amount": 99.99, "card_number": "#redacted"}
+```
+
 ### Context Manager
 
 For tracing non-function code blocks, use the context manager:
@@ -208,6 +218,43 @@ export TERACRON_API_KEY="tcn_..."
 export TERACRON_TARGET_PID=$(pgrep -f "gunicorn")
 teracron-agent
 ```
+
+## Local Interface (Direct Mode — no inter-server HTTPS)
+
+For local development the SDK can send directly to a **local interface** that
+stands in for `teracron.com`, with no inter-server TLS. The interface spools the
+(still-encrypted) envelopes for a locally-running Teracron to consume:
+
+```
+your app ──http──▶ local interface (loopback:3000) ──spool──▶ local Teracron
+```
+
+Start it in its own terminal, then point the SDK at the loopback host:
+
+```bash
+teracron-agent local-interface              # listens on 127.0.0.1:3000
+# in your app / CLI:
+export TERACRON_DOMAIN="localhost:3000"     # loopback → http:// auto-selected
+```
+
+Loopback hosts auto-select `http://` and are allowed **without** the
+`TERACRON_ALLOW_CUSTOM_DOMAIN` escape hatch (this relaxation is loopback-exact —
+production still requires `*.teracron.com` over HTTPS). Full architecture:
+[`LOCAL_INTERFACE.md`](./LOCAL_INTERFACE.md).
+
+## Terminal Diagnostics (for AI agents / on-call)
+
+Query a project's failures without leaving the terminal:
+
+```bash
+teracron-agent login                              # authenticate (stores ~/.teracron)
+teracron-agent projects --json                    # discover the project (find the slug)
+teracron-agent events --status=workflow_failed --json   # search for the crash
+teracron-agent trace <TRACE_ID> --json            # full method / thread-flow
+```
+
+Add `--domain localhost:3000` for local mode. The complete IDE-agent crash
+playbook lives in [`teracron/.agent-skill.md`](./teracron/.agent-skill.md).
 
 ## Configuration
 

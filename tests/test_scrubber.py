@@ -156,7 +156,10 @@ class TestScrubberWithDecorator:
                 span.set_metadata({"order_id": "ORD-1", "secret": "s3cr3t"})
 
         span_dict = client._push_trace_span.call_args[0][0]
-        assert span_dict["metadata"] == {"order_id": "ORD-1"}
+        # Scrubber dropped "secret"; user kept "order_id"; thread context
+        # is auto-injected by the SDK (post-scrubber, diagnostic only).
+        assert span_dict["metadata"]["order_id"] == "ORD-1"
+        assert "secret" not in span_dict["metadata"]
         assert "secret" not in str(span_dict["metadata"])
 
     def test_scrubber_exception_drops_params_safely(self):

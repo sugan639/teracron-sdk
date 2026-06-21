@@ -30,6 +30,55 @@ _PEM_HEADER = "-----BEGIN PUBLIC KEY-----"
 _ALLOWED_DOMAIN_SUFFIX = ".teracron.com"
 _ALLOWED_DOMAINS_EXACT = frozenset({"teracron.com", "www.teracron.com"})
 
+# ── Direct / local-interface mode ──────────────────────────────────────────
+# In local development the SDK talks to a *local interface* (see
+# ``teracron.local_interface``) that stands in for ``teracron.com``. That
+# interface listens on a loopback address over plain HTTP — there is no
+# inter-server TLS in this path. To keep the SSRF protections intact for
+# production users, the loopback relaxation below is scoped *strictly* to
+# loopback hosts; every other host still requires ``*.teracron.com`` (or the
+# explicit ``TERACRON_ALLOW_CUSTOM_DOMAIN`` escape hatch).
+#
+# A host is considered loopback when its bare host (port stripped) is one of
+# the well-known loopback identifiers. We deliberately keep this list small and
+# exact — no wildcard/private-range matching — so the relaxation can never be
+# tricked into pointing telemetry at an arbitrary internal address.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def _is_loopback_host(domain: str) -> bool:
+    """
+    Return True if ``domain`` (``host`` or ``host:port``) is a loopback address.
+
+    Used to (a) select the ``http://`` scheme and (b) permit the host through
+    domain validation without the ``TERACRON_ALLOW_CUSTOM_DOMAIN`` escape hatch.
+    Matching is exact against :data:`_LOOPBACK_HOSTS` — never a range match —
+    so production SSRF protection is unaffected.
+    """
+    if not domain:
+        return False
+    # Strip a trailing :port. IPv6 literals are bracketed (``[::1]:3000``) so a
+    # rsplit on ":" with maxsplit only removes the port, not the address colons.
+    host = domain
+    if host.startswith("["):
+        # Bracketed IPv6 — keep up to and including the closing bracket.
+        end = host.find("]")
+        host = host[: end + 1] if end != -1 else host
+    else:
+        host = host.split(":")[0]
+    return host.lower() in _LOOPBACK_HOSTS
+
+
+def resolve_scheme(domain: str) -> str:
+    """
+    Resolve the URL scheme for a domain.
+
+    Loopback hosts use plain ``http`` (the local interface terminates here and
+    there is no TLS in the local path); every other host uses ``https``.
+    Centralising this keeps transport.py and query.py consistent.
+    """
+    return "http" if _is_loopback_host(domain) else "https"
+
 # Auth & query constants
 CREDENTIALS_DIR = ".teracron"
 CREDENTIALS_FILE = "credentials.json"
@@ -66,8 +115,12 @@ _DEFAULT_TRACE_EMIT_EVENTS = False  # Structured event emission (opt-in)
 
 
 def resolve_api_base_url(domain: str) -> str:
-    """Build the API base URL from a domain: ``https://{domain}/v1``."""
-    return f"https://{domain}{API_BASE_PATH}"
+    """Build the API base URL from a domain: ``{scheme}://{domain}/api/v1``.
+
+    Scheme is ``http`` for loopback (local interface) hosts and ``https``
+    otherwise — see :func:`resolve_scheme`.
+    """
+    return f"{resolve_scheme(domain)}://{domain}{API_BASE_PATH}"
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -98,8 +151,18 @@ def _validate_domain(domain: str) -> str:
     By default only ``*.teracron.com`` is accepted. Set
     ``TERACRON_ALLOW_CUSTOM_DOMAIN=1`` to bypass (e.g. for on-prem).
 
+    Loopback hosts (``localhost``/``127.0.0.1``/``::1``) are *always* allowed
+    without the escape hatch: in local development the SDK targets the local
+    interface (``teracron.local_interface``) that replaces ``teracron.com``.
+    This relaxation is exact-match and loopback-only, so it cannot be abused
+    to redirect production telemetry to an arbitrary internal host.
+
     Returns the validated domain or raises ValueError.
     """
+    # Loopback is always permitted (local interface / direct mode).
+    if _is_loopback_host(domain):
+        return domain
+
     allow_custom = os.environ.get("TERACRON_ALLOW_CUSTOM_DOMAIN", "").lower()
     if allow_custom in ("1", "true", "yes"):
         return domain
@@ -161,18 +224,22 @@ def resolve_config(
         TERACRON_DEBUG
         TERACRON_TARGET_PID
     """
-    # ── Resolve slug + public_key ──
+    # ── Resolve slug + public_key + mode ──
     slug = project_slug
     key = public_key
+    # Mode is carried by the API key (development|production). Mode-less /
+    # legacy keys decode to "production" — the safe default.
+    mode = "production"
 
-    # Decode from api_key kwarg or env var (fills in slug + key if not set)
+    # Decode from api_key kwarg or env var (fills in slug + key + mode if not set)
     _api_key = api_key or os.environ.get("TERACRON_API_KEY", "")
     if _api_key:
-        decoded_slug, decoded_key = decode_api_key(_api_key)
+        decoded_slug, decoded_key, decoded_mode = decode_api_key(_api_key)
         if not slug:
             slug = decoded_slug
         if not key:
             key = decoded_key
+        mode = decoded_mode
 
     # Fallback to individual env vars
     if not slug:
@@ -352,6 +419,7 @@ def resolve_config(
     return ResolvedConfig(
         project_slug=slug,
         public_key=key,
+        mode=mode,
         domain=resolved_domain,
         interval_s=resolved_interval,
         max_buffer_size=resolved_buffer,

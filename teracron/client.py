@@ -175,6 +175,7 @@ class TeracronClient:
             domain=self._config.domain,
             slug=self._config.project_slug,
             timeout_s=self._config.timeout_s,
+            mode=self._config.mode,
         )
 
         self._stop_event.clear()

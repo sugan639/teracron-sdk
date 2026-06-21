@@ -123,7 +123,7 @@ class TestNestedWorkflow:
         orchestrator = client._push_trace_span.call_args_list[2][0][0]
 
         assert orchestrator["parent_span_id"] is None
-        assert orchestrator["metadata"] == {"run_id": "R-001"}
+        assert orchestrator["metadata"]["run_id"] == "R-001"
         assert span_a["parent_span_id"] == orchestrator["span_id"]
         assert span_b["parent_span_id"] == orchestrator["span_id"]
 
@@ -244,4 +244,4 @@ class TestAsyncNesting:
         inner_span = client._push_trace_span.call_args_list[0][0][0]
         outer_span = client._push_trace_span.call_args_list[1][0][0]
         assert inner_span["parent_span_id"] == outer_span["span_id"]
-        assert outer_span["metadata"] == {"step": "validate"}
+        assert outer_span["metadata"]["step"] == "validate"

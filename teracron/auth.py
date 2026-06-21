@@ -258,7 +258,7 @@ def login(api_key: str, domain: str = "www.teracron.com") -> AuthCredentials:
     # Decode to extract project slug — validates structure.
     from .apikey import decode_api_key
 
-    slug, _public_key = decode_api_key(key)
+    slug, _public_key, _mode = decode_api_key(key)
 
     credentials = AuthCredentials(
         api_key=key,

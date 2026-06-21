@@ -70,6 +70,32 @@ class TestResolveConfigApiKey:
                 resolve_config()
 
 
+class TestResolveConfigMode:
+    """The project mode must propagate from the API key into ResolvedConfig."""
+
+    def test_dev_key_sets_development_mode(self):
+        dev_key = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="development")
+        cfg = resolve_config(api_key=dev_key)
+        assert cfg.mode == "development"
+        assert cfg.project_slug == _VALID_SLUG
+
+    def test_prod_key_sets_production_mode(self):
+        prod_key = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="production")
+        cfg = resolve_config(api_key=prod_key)
+        assert cfg.mode == "production"
+
+    def test_legacy_key_defaults_to_production(self):
+        # _VALID_API_KEY is minted without a mode (legacy) → production.
+        cfg = resolve_config(api_key=_VALID_API_KEY)
+        assert cfg.mode == "production"
+
+    def test_dev_mode_from_env(self):
+        dev_key = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="development")
+        with mock.patch.dict(os.environ, {"TERACRON_API_KEY": dev_key}, clear=False):
+            cfg = resolve_config()
+            assert cfg.mode == "development"
+
+
 class TestResolveConfigLegacy:
     """Tests for the legacy project_slug + public_key flow (backward compat)."""
 
@@ -214,11 +240,33 @@ class TestDomainValidation:
         with pytest.raises(ValueError, match="not allowed"):
             resolve_config(api_key=_VALID_API_KEY, domain="evil.com")
 
-    def test_localhost_rejected(self):
-        with pytest.raises(ValueError, match="not allowed"):
-            resolve_config(api_key=_VALID_API_KEY, domain="localhost:8080")
+    def test_localhost_allowed_for_local_interface(self):
+        """Loopback is allowed without the escape hatch (direct/local mode).
 
-    def test_ip_address_rejected(self):
+        The SDK targets the local interface (a loopback stand-in for
+        teracron.com) during development, so localhost/127.0.0.1/::1 must pass
+        domain validation. This relaxation is loopback-exact only — see
+        ``config._is_loopback_host`` — so the SSRF guard below still holds.
+        """
+        for host in ("localhost:8080", "localhost", "127.0.0.1:3000", "127.0.0.1"):
+            cfg = resolve_config(api_key=_VALID_API_KEY, domain=host)
+            assert cfg.domain == host
+
+    def test_loopback_resolves_http_scheme(self):
+        """Loopback hosts use http://; production stays https://."""
+        from teracron.config import resolve_scheme
+
+        assert resolve_scheme("localhost:3000") == "http"
+        assert resolve_scheme("127.0.0.1") == "http"
+        assert resolve_scheme("www.teracron.com") == "https"
+        assert resolve_scheme("ingest.teracron.com:8443") == "https"
+
+    def test_non_loopback_ip_address_rejected(self):
+        """A non-loopback IP (e.g. cloud metadata endpoint) is still rejected.
+
+        This is the SSRF guard: the loopback relaxation must NOT extend to
+        arbitrary private/link-local addresses like 169.254.169.254.
+        """
         with pytest.raises(ValueError, match="not allowed"):
             resolve_config(api_key=_VALID_API_KEY, domain="169.254.169.254")
 

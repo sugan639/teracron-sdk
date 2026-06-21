@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-06-21
+
+### Added
+- **Development / Production mode split** — every Teracron project now has two modes (`development`, `production`) and the mode is encoded directly in the API key (`tcn_<base64url(short-mode:slug:publicKeyPEM)>`). The SDK decodes the mode in `teracron/apikey.py` (`decode_api_key`) and `teracron/config.py` (`resolve_config` → `ResolvedConfig.mode`), and the transport attaches it as the **`X-Project-Mode`** HTTP header on every metrics / traces / events request. Switching modes = swapping the env var; no code changes required. **Backward compatible**: legacy keys without a mode prefix decode to `production` (the safe default). Design reference: `DEV_PROD_MODE.md`.
+- **Local interface (`teracron/local_interface.py`)** — a dependency-free (stdlib `http.server`) loopback stand-in for `teracron.com`, intended for local development. Accepts the same three routes as production (`/api/ingest`, `/api/v1/traces`, `/api/v1/events`) with the same validation rules and size caps, and spools the still-encrypted envelopes to `~/.teracron/local-spool/` for the local Teracron to consume. Binds to loopback only by default; refuses non-loopback hosts unless explicitly forced (`allow_non_loopback=True`). Exposed as `teracron.run_local_interface(...)` and `teracron-agent local-interface` CLI subcommand. Design reference: `LOCAL_INTERFACE.md`.
+- **Local Teracron spool consumer (`teracron/local_teracron.py`)** — watches `~/.teracron/local-spool/` for sidecars written by the local interface, then forwards the encrypted envelopes (unchanged) over HTTPS to Convex's `.convex.site` ingest endpoints with the original `X-Project-Slug` and `X-Project-Mode` headers. **Never decrypts** — the private key stays server-side in Convex. Processed envelopes are archived to `processed/`; permanently-rejected envelopes are quarantined. Exposed as `teracron-agent local-teracron` CLI subcommand.
+- **Loopback scheme resolution** in `teracron/config.py` — when the configured `teracron_domain` resolves to `127.0.0.1` / `localhost`, the SDK automatically switches to `http://` (plaintext, loopback only) instead of `https://`. Production domains always use `https://`. This lets local-mode integration tests run with no TLS setup while keeping production behaviour unchanged.
+- **CLI domain resolution** — `teracron-agent` and the auth flow now honour `TERACRON_DOMAIN` / `--domain` for both REST and Convex endpoints, with explicit precedence (CLI arg > env > default). New test module: `tests/test_cli_domain_resolution.py`.
+- **New tests**: `test_local_interface.py`, `test_local_teracron.py`, `test_cli_domain_resolution.py`. Existing modules expanded for the dev/prod mode split: `test_apikey.py`, `test_config.py`, `test_phase2_capture.py`, `test_phase2_nesting.py`, `test_query.py`, `test_scrubber.py`, `test_span.py`, `test_trace_decorator.py`.
+
+### Changed
+- `teracron/apikey.py` — `encode_api_key()` / `decode_api_key()` now accept and round-trip a `mode` argument; legacy two-segment keys still decode (mode defaults to `production`).
+- `teracron/config.py` — `ResolvedConfig` gained a `mode` field; resolution prefers the mode embedded in the API key, with config-level override available for legacy keys.
+- `teracron/transport.py` — sends `X-Project-Mode` on every request alongside `X-Project-Slug`. Adds explicit loopback handling for the local-mode `http://` path.
+- `teracron/query.py` — query client now scopes results by `mode`, so dashboard reads never mix dev and prod telemetry.
+- `teracron/cli.py` — significantly expanded with subcommands for the local interface, local Teracron consumer, and domain-aware auth flow.
+- `teracron/__init__.py` — re-exports `run_local_interface` for ergonomic access.
+
+### Fixed
+- Tracing decorator (`teracron/tracing/decorator.py`) and span helpers (`teracron/tracing/span.py`) — minor correctness fixes for nested-span parent resolution under the new mode-aware buffer key.
+
+### Security
+- **Mode never travels in source code or in `tcn_…` plaintext.** It is carried as a single short token inside the base64url payload of the API key, alongside the existing slug + public key. No new key material is introduced and no new decryption surface is added.
+- **Local interface refuses non-loopback binds by default.** A plaintext ingest endpoint exposed to the network would be unsafe, so binding to `0.0.0.0` requires an explicit `allow_non_loopback=True` opt-in.
+- **Local Teracron never decrypts.** The encrypted envelope is replayed byte-for-byte to Convex over HTTPS; the private key stays on the server. Local mode therefore has the same crypto trust boundary as production.
+- **Repository URL corrected** in `pyproject.toml` (was pointing at a non-existent GitHub org/repo).
+
+### Documentation
+- New: `DEV_PROD_MODE.md` — end-to-end design of the dev/prod split, including the API-key format, header flow, Convex ingest routing, and dashboard filtering.
+- New: `LOCAL_INTERFACE.md` — design + implementation reference for the local interface, spool contract, and the loopback scheme resolution.
+- Updated `README.md` and the two `.agent-skill.md` files (`teracron/.agent-skill.md`, `teracron/tracing/.agent-skill.md`) so AI agents implementing Teracron support pick up the dev/prod mode automatically.
+
 ## [0.6.1] - 2026-04-27
 
 ### Fixed

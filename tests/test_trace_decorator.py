@@ -608,7 +608,8 @@ class TestTraceContextManager:
         assert span_dict["workflow"] == "payment"
         assert span_dict["operation"] == "validate"
         assert span_dict["status"] == "succeeded"
-        assert span_dict["metadata"] == {"order_id": "ORD-123"}
+        # User metadata is preserved; SDK also auto-injects thread context.
+        assert span_dict["metadata"]["order_id"] == "ORD-123"
 
     def test_context_manager_default_operation(self):
         client = _make_mock_client()
@@ -673,7 +674,9 @@ class TestTraceContextManager:
                 span.set_metadata({"b": 2})
 
         span_dict = client._push_trace_span.call_args[0][0]
-        assert span_dict["metadata"] == {"a": 1, "b": 2}
+        # User merges preserved; thread context auto-injected alongside.
+        assert span_dict["metadata"]["a"] == 1
+        assert span_dict["metadata"]["b"] == 2
 
 
 class TestAsyncTraceContextManager:
@@ -701,7 +704,7 @@ class TestAsyncTraceContextManager:
         span_dict = client._push_trace_span.call_args[0][0]
         assert span_dict["workflow"] == "payment"
         assert span_dict["operation"] == "verify"
-        assert span_dict["metadata"] == {"txn": "T-001"}
+        assert span_dict["metadata"]["txn"] == "T-001"
 
     def test_async_context_manager_on_exception(self):
         client = _make_mock_client()

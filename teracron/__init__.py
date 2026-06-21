@@ -64,13 +64,14 @@ Standalone CLI agent::
     $ teracron-agent
 """
 
-__version__ = "0.6.1"
+__version__ = "0.7.1"
 
 from .client import TeracronClient, up, down
 from .apikey import encode_api_key, decode_api_key
 from .auth import login, logout, whoami, resolve_api_key
 from .query import TeracronQueryClient
 from .simulate import FailureSimulator
+from .local_interface import serve as run_local_interface
 from .tracing import (
     trace,
     trace_context,
@@ -114,6 +115,8 @@ __all__ = [
     "TeracronQueryClient",
     # Simulation (Phase 4)
     "FailureSimulator",
+    # Local interface (direct/local mode — dev stand-in for teracron.com)
+    "run_local_interface",
     # Advanced / explicit
     "TeracronClient",
     # Types

@@ -28,7 +28,7 @@ from urllib.parse import urlencode
 import requests
 
 from . import __version__
-from .config import _validate_domain, _sanitise_domain
+from .config import _validate_domain, _sanitise_domain, resolve_scheme
 
 _SDK_VERSION = __version__
 _QUERY_TIMEOUT_S = 10.0
@@ -82,10 +82,12 @@ class TeracronQueryClient:
             raise ValueError("[Teracron] api_key is required for TeracronQueryClient.")
 
         # Sanitise and validate domain to prevent SSRF — same rules as config.py.
+        # Loopback hosts are permitted (local interface / direct mode) and use
+        # http://; everything else uses https:// — see config.resolve_scheme.
         safe_domain = _sanitise_domain(domain)
         _validate_domain(safe_domain)
 
-        self._base_url = f"https://{safe_domain}/api/v1"
+        self._base_url = f"{resolve_scheme(safe_domain)}://{safe_domain}/api/v1"
         self._timeout = max(2.0, min(timeout_s, 30.0))
 
         self._session = requests.Session()
@@ -258,6 +260,57 @@ class TeracronQueryClient:
         if not clean_id or len(clean_id) > 64 or not all(c in _HEX_CHARS for c in clean_id):
             return _error_result(0, "Invalid span_id — must be a lowercase hex string (max 64 chars).")
         return self._get(f"/spans/{clean_id}")
+
+    def list_recent_spans(
+        self,
+        *,
+        since: Optional[int] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """
+        Fetch the most-recent trace spans for the authenticated project.
+
+        ``GET /api/v1/logs?since=<cursor>&limit=<n>``
+
+        This powers the live-log tail (``teracron-agent logs --follow``): an
+        agent polls this endpoint repeatedly, passing the ``cursor`` it got back
+        last time as ``since`` so each call returns only spans newer than the
+        last one it printed (no duplicates, cheap per poll).
+
+        Args:
+            since: Exclusive ``started_at`` watermark (Unix ms). Omit for the
+                first poll; thereafter pass the previous response's ``cursor``.
+            limit: Max spans to return (clamped to 1–500 server-side).
+
+        Returns:
+            Dict with ``spans`` list + ``cursor`` (next watermark) on success,
+            or ``error`` + ``hint`` on failure.
+        """
+        safe_limit = max(1, min(limit, _MAX_LIMIT))
+        return self._get(
+            "/logs",
+            params={"since": since, "limit": safe_limit},
+        )
+
+    def list_projects(self) -> Dict[str, Any]:
+        """
+        List the project(s) the current API key can access.
+
+        ``GET /api/v1/projects``
+
+        Discovery step for AI agents: before searching for a crash, the agent
+        calls this to learn which project the credentials map to (e.g. the
+        payment server) and which ``slug`` to reference.
+
+        NOTE: A Teracron API key is *project-scoped* — it authenticates exactly
+        one project — so this returns a single-element ``projects`` list. The
+        list shape is kept for forward-compatibility and uniform CLI rendering.
+
+        Returns:
+            Dict with ``projects`` list (each ``{slug, name}``) and ``count`` on
+            success, or ``error`` + ``hint`` on failure.
+        """
+        return self._get("/projects")
 
     def close(self) -> None:
         """Release the underlying connection pool."""

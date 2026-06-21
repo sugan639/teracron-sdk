@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HTTPS Transport — sends encrypted envelopes to the Teracron ingest endpoint.
+Transport — sends encrypted envelopes to the Teracron ingest endpoint.
 
 Design:
     - Uses ``requests.Session`` with HTTP keep-alive for persistent connections.
@@ -9,7 +9,17 @@ Design:
     - Follows redirects (307/308) automatically via requests library.
     - Fire-and-return — retry logic is handled at the client level.
 
-SECURITY: Only TLS 1.2+ is accepted (requests defaults to system CA bundle).
+ENDPOINT RESOLUTION:
+    The target scheme is resolved per-domain via ``config.resolve_scheme``:
+      - Production (``*.teracron.com``)  → ``https://`` (TLS, system CA bundle).
+      - Local interface (loopback host)  → ``http://`` (the local interface,
+        ``teracron.local_interface``, terminates here; there is no TLS in the
+        local path). Payloads remain RSA+AES encrypted regardless of scheme,
+        so dropping TLS for the loopback hop does not expose plaintext.
+
+SECURITY: For non-loopback hosts only TLS is used (requests defaults to the
+system CA bundle). The ``http://`` path is strictly loopback-scoped — see
+``config._is_loopback_host``.
 """
 
 from __future__ import annotations
@@ -23,6 +33,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from . import __version__
+from .config import resolve_scheme
 
 _SDK_VERSION = __version__
 _MAX_RETRIES_ON_CONNECT = 1  # Single retry on connection reset (keep-alive stale)
@@ -44,12 +55,27 @@ class Transport:
     handshake overhead across repeated flushes.
     """
 
-    __slots__ = ("_session", "_url", "_slug", "_timeout")
+    __slots__ = ("_session", "_url", "_slug", "_timeout", "_scheme", "_mode")
 
-    def __init__(self, domain: str, slug: str, timeout_s: float) -> None:
-        self._url = f"https://{domain}/api/ingest"
+    def __init__(
+        self,
+        domain: str,
+        slug: str,
+        timeout_s: float,
+        mode: str = "production",
+    ) -> None:
+        # Scheme is loopback-aware: http:// for the local interface, https://
+        # for production. Mounting the retry adapter on the same scheme below
+        # keeps keep-alive/retry behaviour identical across both paths.
+        self._scheme = resolve_scheme(domain)
+        self._url = f"{self._scheme}://{domain}/api/ingest"
         self._slug = slug
         self._timeout = timeout_s
+        # Mode travels on every ingest request via the X-Project-Mode header so
+        # the server can (a) pick the correct mode-scoped private key to decrypt
+        # and (b) tag stored rows with the originating mode. The header is a
+        # *hint*; the server still cross-checks it against the key actually used.
+        self._mode = mode if mode in ("development", "production") else "production"
 
         self._session = requests.Session()
 
@@ -73,11 +99,14 @@ class Transport:
             pool_connections=1,
             pool_maxsize=1,
         )
-        self._session.mount("https://", adapter)
+        # Mount on the resolved scheme so loopback (http) and production (https)
+        # both get the keep-alive pool + single-retry behaviour.
+        self._session.mount(f"{self._scheme}://", adapter)
 
         self._session.headers.update({
             "Content-Type": "application/octet-stream",
             "X-Project-Slug": self._slug,
+            "X-Project-Mode": self._mode,
             "User-Agent": f"teracron-sdk-python/{_SDK_VERSION} python/{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         })
 
@@ -127,7 +156,7 @@ class Transport:
 
     @property
     def query_base_url(self) -> str:
-        """Base URL for query endpoints: ``https://{domain}/api/v1``."""
+        """Base URL for query endpoints: ``{scheme}://{domain}/api/v1``."""
         return self._url.replace("/api/ingest", "/api/v1")
 
     def close(self) -> None:

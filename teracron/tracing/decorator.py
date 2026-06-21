@@ -118,6 +118,47 @@ def _extract_captured_params(
     return result if result else None
 
 
+# Sentinel string written for parameters that exist on the call but were NOT
+# whitelisted for capture. Lets the AI agent / thread-flow view see that an
+# argument *flowed* through a method while keeping its value private.
+REDACTED_MARKER = "#redacted"
+
+
+def _extract_params_with_redaction(
+    func: Callable[..., Any],
+    capture: Sequence[str],
+    args: tuple,
+    kwargs: dict,
+) -> Optional[Dict[str, object]]:
+    """
+    Like :func:`_extract_captured_params`, but additionally records every other
+    bound parameter as the :data:`REDACTED_MARKER` placeholder.
+
+    This satisfies the product requirement that selected data is captured and
+    "the remaining will be sent as #redacted" — so a crash trace shows the full
+    method signature shape (which args existed) without leaking their values.
+
+    PII boundary is preserved: only names in ``capture`` get real values; all
+    other names map to the constant ``"#redacted"`` string — never their value.
+
+    Returns ``None`` only when the function takes no bindable parameters (keeps
+    empty dicts off the wire), matching the non-redacting helper's contract.
+    """
+    try:
+        sig = inspect.signature(func)
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+    except (TypeError, ValueError):
+        return None
+
+    capture_set = frozenset(capture)
+    result: Dict[str, object] = {}
+    for name, value in bound.arguments.items():
+        result[name] = value if name in capture_set else REDACTED_MARKER
+
+    return result if result else None
+
+
 # ── Core span lifecycle (shared by decorator and context manager) ──
 
 
@@ -317,6 +358,7 @@ def trace(
     workflow: str,
     *,
     capture: Optional[Sequence[str]] = None,
+    redact_uncaptured: bool = False,
 ) -> Callable[[F], F]:
     """
     Decorator that traces a function as part of a named workflow.
@@ -327,6 +369,12 @@ def trace(
                   sent to Teracron.  **Only whitelisted names are captured.**
                   By default ``None`` — no parameter values are transmitted.
                   This is the PII safety boundary.
+        redact_uncaptured: When ``True``, parameters *not* in ``capture`` are
+                  still recorded — but as the constant ``"#redacted"`` marker
+                  instead of their value. This lets the crash thread-flow show
+                  which arguments existed on each method without leaking them.
+                  Defaults to ``False`` (only whitelisted params appear at all),
+                  preserving the original minimal-footprint behaviour.
 
     Usage::
 
@@ -349,6 +397,11 @@ def trace(
 
     # Freeze capture list at decoration time — immutable after this point.
     _capture: tuple = tuple(capture) if capture else ()
+    # Select the param extractor once (decoration time): redacting variant when
+    # redact_uncaptured is set, otherwise the minimal whitelist-only variant.
+    _extract = (
+        _extract_params_with_redaction if redact_uncaptured else _extract_captured_params
+    )
 
     def decorator(func: F) -> F:
         if asyncio.iscoroutinefunction(func):
@@ -370,7 +423,7 @@ def trace(
 
                 # Extract captured params only if sampled (avoid unnecessary work).
                 params = (
-                    _extract_captured_params(func, _capture, args, kwargs)
+                    _extract(func, _capture, args, kwargs)
                     if sampled else None
                 )
 
@@ -415,7 +468,7 @@ def trace(
 
                 # Extract captured params only if sampled (avoid unnecessary work).
                 params = (
-                    _extract_captured_params(func, _capture, args, kwargs)
+                    _extract(func, _capture, args, kwargs)
                     if sampled else None
                 )
 

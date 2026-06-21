@@ -214,6 +214,10 @@ class ResolvedConfig:
     max_buffer_size: int
     timeout_s: float
     flush_deadline_s: float = 60.0  # seconds — time-based flush ceiling
+    # Project mode carried by the API key: "development" | "production".
+    # Decides which mode-scoped bucket telemetry lands in. Defaults to
+    # "production" so legacy (mode-less) keys keep their prior behaviour.
+    mode: str = "production"
     debug: bool = False
     target_pid: Optional[int] = field(default=None)
     # Tracing

@@ -10,6 +10,7 @@ Phase 2: supports parent_span_id (nesting), metadata, and captured_params.
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from dataclasses import replace
@@ -23,6 +24,43 @@ from ..types import (
     METADATA_MAX_VALUE_LEN,
     Span,
 )
+
+
+# Reserved metadata keys auto-populated by the SDK so the dashboard's live-log
+# search can filter by thread without the user having to add anything. These
+# are *never* overwritten if the user explicitly set the same key — user
+# values always win.
+_RESERVED_THREAD_NAME_KEY = "thread_name"
+_RESERVED_THREAD_ID_KEY = "thread_id"
+
+
+def _capture_thread_context() -> Dict[str, object]:
+    """
+    Return a tiny metadata dict describing the current thread.
+
+    Why this lives here: ``finalise_span`` is the single chokepoint that
+    every code path (decorator, ``trace_context``, FastAPI/Django/Celery
+    middleware, future call sites) routes through. Injecting once here
+    guarantees uniform coverage without touching N call sites.
+
+    Failure mode: ``threading`` is a stdlib module and these calls cannot
+    realistically raise — but if they ever did, we swallow the error so
+    telemetry never breaks the user's application.
+    """
+    try:
+        current = threading.current_thread()
+        # ``ident`` may be ``None`` if the thread hasn't started yet; the
+        # finalising thread is always running, so this is just defensive.
+        thread_id = current.ident
+        thread_name = current.name
+        ctx: Dict[str, object] = {}
+        if isinstance(thread_name, str) and thread_name:
+            ctx[_RESERVED_THREAD_NAME_KEY] = thread_name
+        if isinstance(thread_id, int):
+            ctx[_RESERVED_THREAD_ID_KEY] = thread_id
+        return ctx
+    except Exception:  # pragma: no cover — defensive
+        return {}
 
 
 def create_span(
@@ -90,6 +128,17 @@ def finalise_span(
     """
     safe_metadata = _sanitise_metadata(metadata) if metadata else None
     safe_params = _sanitise_captured_params(captured_params) if captured_params else None
+
+    # Auto-inject thread context so the dashboard's live-log search can
+    # filter by thread name / id without requiring user instrumentation.
+    # User-supplied keys ALWAYS win — we only fill in gaps. This keeps the
+    # change strictly additive and backward-compatible.
+    thread_ctx = _capture_thread_context()
+    if thread_ctx:
+        merged: Dict[str, object] = dict(thread_ctx)
+        if safe_metadata:
+            merged.update(safe_metadata)  # user values overwrite reserved
+        safe_metadata = merged
 
     # Truncate error_message to prevent oversized payloads.
     safe_error_message = error_message

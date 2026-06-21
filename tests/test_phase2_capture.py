@@ -9,7 +9,13 @@ from unittest import mock
 
 import pytest
 
-from teracron.tracing.decorator import trace, trace_context, _extract_captured_params
+from teracron.tracing.decorator import (
+    trace,
+    trace_context,
+    _extract_captured_params,
+    _extract_params_with_redaction,
+    REDACTED_MARKER,
+)
 from teracron.tracing.context import clear_trace
 from teracron.tracing.sampling import clear_sampling_decision
 from teracron.tracing.span import (
@@ -37,6 +43,41 @@ def _make_mock_client(tracing_enabled=True):
 
 
 # ── _extract_captured_params unit tests ──
+
+
+class TestExtractParamsWithRedaction:
+    """Tests for the opt-in #redacted placeholder behaviour."""
+
+    def test_captured_kept_others_redacted(self):
+        def func(a, b, password):
+            pass
+        # Only 'a' whitelisted; 'b' and 'password' become "#redacted".
+        result = _extract_params_with_redaction(
+            func, ["a"], (3, 4, "hunter2"), {}
+        )
+        assert result == {"a": 3, "b": REDACTED_MARKER, "password": REDACTED_MARKER}
+
+    def test_no_capture_all_redacted(self):
+        def func(a, b):
+            pass
+        result = _extract_params_with_redaction(func, [], (1, 2), {})
+        assert result == {"a": REDACTED_MARKER, "b": REDACTED_MARKER}
+
+    def test_no_params_returns_none(self):
+        def func():
+            pass
+        assert _extract_params_with_redaction(func, [], (), {}) is None
+
+    def test_marker_value(self):
+        assert REDACTED_MARKER == "#redacted"
+
+    def test_redaction_opt_in_does_not_affect_default(self):
+        """Default extractor still omits non-captured params entirely."""
+        def func(a, b):
+            pass
+        result = _extract_captured_params(func, ["a"], (1, 2), {})
+        assert result == {"a": 1}
+        assert "b" not in result
 
 
 class TestExtractCapturedParams:
@@ -279,7 +320,12 @@ class TestPIIBoundary:
         client._push_trace_span.assert_not_called()
 
     def test_context_manager_metadata_no_pii_by_default(self):
-        """Context manager does not auto-capture anything."""
+        """Context manager does not auto-capture any user/PII data.
+
+        The SDK auto-injects ``thread_name`` / ``thread_id`` to power the
+        dashboard's live-log thread filter — these are diagnostic only and
+        carry NO user/PII data, so the PII boundary still holds.
+        """
         client = _make_mock_client()
 
         with mock.patch("teracron.tracing.decorator._get_client", return_value=client):
@@ -288,5 +334,8 @@ class TestPIIBoundary:
                 pass
 
         span_dict = client._push_trace_span.call_args[0][0]
-        assert span_dict["metadata"] is None
+        # captured_params remains None — explicit opt-in still required.
         assert span_dict["captured_params"] is None
+        # Only the reserved thread keys are present; no user PII.
+        assert span_dict["metadata"] is not None
+        assert set(span_dict["metadata"].keys()) <= {"thread_name", "thread_id"}

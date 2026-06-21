@@ -49,6 +49,13 @@ class TestClientConstruction:
         )
         assert client._base_url == "https://api.teracron.com/api/v1"
 
+    def test_loopback_domain_uses_http(self) -> None:
+        """Local interface (loopback) uses http:// and is allowed sans escape hatch."""
+        client = TeracronQueryClient(
+            api_key=_TEST_API_KEY, domain="localhost:3000"
+        )
+        assert client._base_url == "http://localhost:3000/api/v1"
+
     def test_empty_key_raises(self) -> None:
         with pytest.raises(ValueError, match="api_key is required"):
             TeracronQueryClient(api_key="")
@@ -176,6 +183,36 @@ class TestListWorkflows:
             result = client.list_workflows(limit=10)
 
         assert "workflows" in result
+
+
+# ── list_projects ──
+
+
+class TestListProjects:
+    def test_success(self) -> None:
+        client = TeracronQueryClient(api_key=_TEST_API_KEY)
+        mock_resp = _mock_response(
+            200,
+            {"projects": [{"slug": "vivid-kudu-655", "name": "Payment"}], "count": 1},
+        )
+
+        with mock.patch.object(client._session, "get", return_value=mock_resp) as get:
+            result = client.list_projects()
+
+        # Hits the /projects path.
+        assert get.call_args[0][0].endswith("/api/v1/projects")
+        assert result["projects"][0]["slug"] == "vivid-kudu-655"
+        assert result["count"] == 1
+
+    def test_404_returns_structured_error(self) -> None:
+        client = TeracronQueryClient(api_key=_TEST_API_KEY)
+        mock_resp = _mock_response(404)
+
+        with mock.patch.object(client._session, "get", return_value=mock_resp):
+            result = client.list_projects()
+
+        assert result.get("status_code") == 404
+        assert result.get("error")
 
 
 # ── get_span ──

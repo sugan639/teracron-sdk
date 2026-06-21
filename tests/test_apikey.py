@@ -19,9 +19,11 @@ class TestEncodeApiKey:
 
     def test_roundtrip(self):
         key = encode_api_key(_VALID_SLUG, _VALID_PEM)
-        slug, pem = decode_api_key(key)
+        slug, pem, mode = decode_api_key(key)
         assert slug == _VALID_SLUG
         assert pem == _VALID_PEM
+        # No explicit mode given to encode → defaults to production.
+        assert mode == "production"
 
     def test_invalid_slug_raises(self):
         with pytest.raises(ValueError, match="Invalid slug"):
@@ -54,9 +56,10 @@ class TestDecodeApiKey:
 
     def test_valid_key(self):
         key = encode_api_key(_VALID_SLUG, _VALID_PEM)
-        slug, pem = decode_api_key(key)
+        slug, pem, mode = decode_api_key(key)
         assert slug == _VALID_SLUG
         assert pem == _VALID_PEM
+        assert mode == "production"
 
     def test_missing_prefix_raises(self):
         with pytest.raises(ValueError, match="Invalid API key format"):
@@ -100,7 +103,7 @@ class TestDecodeApiKey:
 
     def test_whitespace_stripped(self):
         key = encode_api_key(_VALID_SLUG, _VALID_PEM)
-        slug, pem = decode_api_key(f"  {key}  ")
+        slug, pem, _mode = decode_api_key(f"  {key}  ")
         assert slug == _VALID_SLUG
 
     def test_pem_with_colons_preserved(self):
@@ -111,6 +114,48 @@ class TestDecodeApiKey:
             "-----END PUBLIC KEY-----"
         )
         key = encode_api_key(_VALID_SLUG, pem_with_content)
-        slug, decoded_pem = decode_api_key(key)
+        slug, decoded_pem, _mode = decode_api_key(key)
         assert slug == _VALID_SLUG
         assert decoded_pem == pem_with_content
+
+
+class TestApiKeyModes:
+    """Tests for the dev/prod mode split carried by the API key."""
+
+    def test_dev_mode_roundtrip(self):
+        key = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="development")
+        slug, pem, mode = decode_api_key(key)
+        assert slug == _VALID_SLUG
+        assert pem == _VALID_PEM
+        assert mode == "development"
+
+    def test_prod_mode_roundtrip(self):
+        key = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="production")
+        _slug, _pem, mode = decode_api_key(key)
+        assert mode == "production"
+
+    def test_short_mode_aliases_accepted(self):
+        dev = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="dev")
+        prod = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="prod")
+        assert decode_api_key(dev)[2] == "development"
+        assert decode_api_key(prod)[2] == "production"
+
+    def test_invalid_mode_raises(self):
+        with pytest.raises(ValueError, match="Invalid mode"):
+            encode_api_key(_VALID_SLUG, _VALID_PEM, mode="staging")
+
+    def test_legacy_two_part_key_defaults_to_production(self):
+        """A legacy key (slug:PEM, no mode prefix) decodes as production."""
+        import base64
+
+        payload = f"{_VALID_SLUG}:{_VALID_PEM}".encode("utf-8")
+        encoded = base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+        slug, pem, mode = decode_api_key(f"tcn_{encoded}")
+        assert slug == _VALID_SLUG
+        assert pem == _VALID_PEM
+        assert mode == "production"
+
+    def test_dev_and_prod_keys_differ(self):
+        dev = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="development")
+        prod = encode_api_key(_VALID_SLUG, _VALID_PEM, mode="production")
+        assert dev != prod

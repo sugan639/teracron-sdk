@@ -217,7 +217,13 @@ class TestFinaliseSpan:
             span, status="succeeded", duration_ms=1.0,
             metadata={"order_id": "ORD-123", "amount": 99.99},
         )
-        assert finished.metadata == {"order_id": "ORD-123", "amount": 99.99}
+        # User-supplied metadata is preserved verbatim. The SDK also
+        # auto-injects ``thread_name`` / ``thread_id`` for dashboard search
+        # filters — assert the user pairs survive without asserting on the
+        # reserved keys (those are covered separately).
+        assert finished.metadata is not None
+        assert finished.metadata["order_id"] == "ORD-123"
+        assert finished.metadata["amount"] == 99.99
 
     def test_with_captured_params(self):
         span = create_span("w", "op")
@@ -233,7 +239,9 @@ class TestFinaliseSpan:
             span, status="succeeded", duration_ms=1.0,
             metadata={123: "bad_key", "good": "val"},  # type: ignore
         )
-        assert finished.metadata == {"good": "val"}
+        assert finished.metadata is not None
+        assert finished.metadata.get("good") == "val"
+        assert 123 not in finished.metadata  # invalid key dropped
 
     def test_metadata_sanitises_invalid_values(self):
         span = create_span("w", "op")
@@ -241,7 +249,9 @@ class TestFinaliseSpan:
             span, status="succeeded", duration_ms=1.0,
             metadata={"a": "ok", "b": [1, 2, 3]},  # list is invalid
         )
-        assert finished.metadata == {"a": "ok"}
+        assert finished.metadata is not None
+        assert finished.metadata.get("a") == "ok"
+        assert "b" not in finished.metadata  # invalid value dropped
 
     def test_metadata_truncates_long_strings(self):
         span = create_span("w", "op")
@@ -272,3 +282,69 @@ class TestFinaliseSpan:
         )
         assert finished.error_message is not None
         assert len(finished.error_message) == 1024
+
+
+class TestThreadContextAutoInjection:
+    """
+    Tests for the auto-injected ``thread_name`` / ``thread_id`` metadata.
+
+    These fields power the dashboard's live-log thread filters and must be
+    present on every finalised span — regardless of whether the user passed
+    any metadata at all — without ever clobbering user-supplied values.
+    """
+
+    def test_injected_when_no_user_metadata(self):
+        import threading
+
+        span = create_span("w", "op")
+        finished = finalise_span(span, status="succeeded", duration_ms=1.0)
+
+        assert finished.metadata is not None
+        assert finished.metadata.get("thread_name") == threading.current_thread().name
+        assert finished.metadata.get("thread_id") == threading.current_thread().ident
+
+    def test_injected_alongside_user_metadata(self):
+        import threading
+
+        span = create_span("w", "op")
+        finished = finalise_span(
+            span, status="succeeded", duration_ms=1.0,
+            metadata={"order_id": "ORD-1"},
+        )
+        assert finished.metadata is not None
+        assert finished.metadata["order_id"] == "ORD-1"
+        assert finished.metadata["thread_name"] == threading.current_thread().name
+        assert finished.metadata["thread_id"] == threading.current_thread().ident
+
+    def test_user_value_wins_over_reserved_key(self):
+        """If the user explicitly sets ``thread_name`` their value must win."""
+        span = create_span("w", "op")
+        finished = finalise_span(
+            span, status="succeeded", duration_ms=1.0,
+            metadata={"thread_name": "my-custom-thread"},
+        )
+        assert finished.metadata is not None
+        assert finished.metadata["thread_name"] == "my-custom-thread"
+        # thread_id is still auto-filled since the user didn't set it.
+        assert "thread_id" in finished.metadata
+
+    def test_reflects_worker_thread_name(self):
+        """Thread name captured matches the thread that finalised the span."""
+        import threading
+
+        captured: dict = {}
+
+        def worker():
+            t = threading.current_thread()
+            t.name = "TeracronWorker-7"
+            span = create_span("w", "op")
+            finished = finalise_span(span, status="succeeded", duration_ms=1.0)
+            captured["metadata"] = finished.metadata
+
+        thread = threading.Thread(target=worker, name="TeracronWorker-7")
+        thread.start()
+        thread.join()
+
+        assert captured["metadata"] is not None
+        assert captured["metadata"]["thread_name"] == "TeracronWorker-7"
+        assert isinstance(captured["metadata"]["thread_id"], int)
